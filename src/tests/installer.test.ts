@@ -229,6 +229,78 @@ async function runInstallerTests() {
 
   InstallerSessionStore.clearSession();
 
+  // ----------------------------------------------------
+  // TEST 11: Native Installer State Schema & Contract Verification
+  // ----------------------------------------------------
+  console.log('\n--- Test 11: Native Installer State Schema & Contract Verification ---');
+  const { validateNativeInstallerState } = await import('../services/InstallerStateValidator');
+
+  // Test 11a: OOBE_PENDING with userConfig = null (Expected on fresh install)
+  const validOobePending = {
+    version: 'windroid-installer-state-v1',
+    state: 'OOBE_PENDING' as const,
+    updatedAt: new Date().toISOString(),
+    targetDisk: '/dev/sda',
+    localeConfig: { language: 'en_US.UTF-8', keyboard: 'us', timezone: 'UTC' },
+    userConfig: null,
+    installationCompleted: true,
+    installationCompletedAt: new Date().toISOString(),
+    oobeCompleted: false,
+    oobeCompletedAt: null,
+    completedAt: new Date().toISOString(),
+    error: null
+  };
+  const res1 = validateNativeInstallerState(validOobePending);
+  assert(res1.valid, 'OOBE_PENDING with userConfig=null and installationCompleted=true is VALID');
+
+  // Test 11b: OOBE_PENDING with userConfig populated must be rejected
+  const invalidOobePendingWithUser = {
+    ...validOobePending,
+    userConfig: { username: 'test' }
+  };
+  const res2 = validateNativeInstallerState(invalidOobePendingWithUser);
+  assert(!res2.valid, 'OOBE_PENDING with premature userConfig is REJECTED');
+
+  // Test 11c: INSTALLATION_IN_PROGRESS validation
+  const validInProgress = {
+    version: 'windroid-installer-state-v1',
+    state: 'INSTALLATION_IN_PROGRESS' as const,
+    updatedAt: new Date().toISOString(),
+    targetDisk: '/dev/sda',
+    localeConfig: {},
+    userConfig: null,
+    installationCompleted: false,
+    oobeCompleted: false
+  };
+  const res3 = validateNativeInstallerState(validInProgress);
+  assert(res3.valid, 'INSTALLATION_IN_PROGRESS with installationCompleted=false is VALID');
+
+  // Test 11d: OOBE_COMPLETE / DESKTOP_READY validation
+  const validOobeComplete = {
+    version: 'windroid-installer-state-v1',
+    state: 'OOBE_COMPLETE' as const,
+    updatedAt: new Date().toISOString(),
+    targetDisk: '/dev/sda',
+    localeConfig: { language: 'en_US.UTF-8' },
+    userConfig: { username: 'alex', fullName: 'Alex User', deviceName: 'Alex-PC' },
+    installationCompleted: true,
+    installationCompletedAt: new Date().toISOString(),
+    oobeCompleted: true,
+    oobeCompletedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    error: null
+  };
+  const res4 = validateNativeInstallerState(validOobeComplete);
+  assert(res4.valid, 'OOBE_COMPLETE with valid real userConfig is VALID');
+
+  // Test 11e: OOBE_COMPLETE with temporary username 'windroid-oobe' must be rejected
+  const invalidOobeCompleteUser = {
+    ...validOobeComplete,
+    userConfig: { username: 'windroid-oobe' }
+  };
+  const res5 = validateNativeInstallerState(invalidOobeCompleteUser);
+  assert(!res5.valid, 'OOBE_COMPLETE with temporary user "windroid-oobe" is REJECTED');
+
   console.log('\n==================================================');
   console.log('ALL INSTALLER AUTOMATED TESTS COMPLETED SUCCESSFULLY');
   console.log('==================================================\n');

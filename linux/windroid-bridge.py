@@ -217,8 +217,80 @@ RESERVED_SYSTEM_USERNAMES = {
     "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody",
     "systemd-network", "systemd-resolve", "messagebus", "systemd-timesync",
     "avahi-autoipd", "avahi", "usbmux", "dnsmasq", "kdm", "gdm", "lightdm",
-    "nodm", "desktop", "guest", "live", "user", "windroid-pc"
+    "nodm", "desktop", "guest", "live", "user", "windroid-pc", "windroid-oobe"
 }
+
+def validate_native_installer_state_data(data: dict) -> tuple[bool, str | None]:
+    if not isinstance(data, dict):
+        return False, "State data must be a dictionary"
+
+    if data.get("version") != STATE_VERSION:
+        return False, f"Invalid version: '{data.get('version')}', expected '{STATE_VERSION}'"
+
+    state = data.get("state")
+    if state not in VALID_STATES:
+        return False, f"Invalid state: '{state}'"
+
+    # 1. INSTALLATION_IN_PROGRESS
+    if state == "INSTALLATION_IN_PROGRESS":
+        if data.get("userConfig") is not None:
+            return False, "userConfig must be null during INSTALLATION_IN_PROGRESS"
+        if data.get("installationCompleted") is True:
+            return False, "installationCompleted must be false during INSTALLATION_IN_PROGRESS"
+        if data.get("oobeCompleted") is True:
+            return False, "oobeCompleted must be false during INSTALLATION_IN_PROGRESS"
+        return True, None
+
+    # 2. OOBE_PENDING
+    if state == "OOBE_PENDING":
+        if data.get("userConfig") is not None:
+            return False, "userConfig must be null in OOBE_PENDING state before user registration"
+        if data.get("installationCompleted") is not True:
+            return False, "installationCompleted must be true for OOBE_PENDING"
+        if data.get("oobeCompleted") is True:
+            return False, "oobeCompleted must be false for OOBE_PENDING"
+        if not (data.get("installationCompletedAt") or data.get("completedAt") or data.get("updatedAt")):
+            return False, "Timestamp (installationCompletedAt or completedAt) must be present for OOBE_PENDING"
+        if data.get("error") is not None:
+            return False, "error must be null for OOBE_PENDING"
+        return True, None
+
+    # 3. OOBE_IN_PROGRESS
+    if state == "OOBE_IN_PROGRESS":
+        if data.get("installationCompleted") is not True:
+            return False, "installationCompleted must be true for OOBE_IN_PROGRESS"
+        if data.get("oobeCompleted") is True:
+            return False, "oobeCompleted must be false during OOBE_IN_PROGRESS"
+        if data.get("error") is not None:
+            return False, "error must be null for OOBE_IN_PROGRESS"
+        return True, None
+
+    # 4. OOBE_COMPLETE / DESKTOP_READY
+    if state in ["OOBE_COMPLETE", "DESKTOP_READY"]:
+        if data.get("installationCompleted") is not True:
+            return False, f"installationCompleted must be true for {state}"
+        if data.get("oobeCompleted") is not True:
+            return False, f"oobeCompleted must be true for {state}"
+        u_cfg = data.get("userConfig")
+        if not isinstance(u_cfg, dict):
+            return False, f"userConfig must be a valid dictionary for {state}"
+        username = str(u_cfg.get("username", "")).strip()
+        if not username or username == "windroid-oobe" or username in RESERVED_SYSTEM_USERNAMES:
+            return False, f"userConfig contains invalid or reserved username: '{username}'"
+        if not re.match(r'^[a-z_][a-z0-9_-]*$', username):
+            return False, f"userConfig username '{username}' does not match required format"
+        if not (data.get("oobeCompletedAt") or data.get("completedAt") or data.get("updatedAt")):
+            return False, f"Timestamp (oobeCompletedAt or completedAt) must be present for {state}"
+        if data.get("error") is not None:
+            return False, f"error must be null for {state}"
+        return True, None
+
+    # 5. FAILED
+    if state == "FAILED":
+        return True, None
+
+    # 6. INSTALLER / INSTALLATION_COMPLETE
+    return True, None
 
 def load_native_installer_state(target_root="/"):
     filepath = os.path.join(target_root, "var/lib/windroid/installer-state.json")
@@ -235,6 +307,10 @@ def load_native_installer_state(target_root="/"):
             "targetDisk": None,
             "localeConfig": {},
             "userConfig": None,
+            "installationCompleted": False,
+            "installationCompletedAt": None,
+            "oobeCompleted": False,
+            "oobeCompletedAt": None,
             "completedAt": None,
             "error": None
         }
@@ -269,20 +345,51 @@ def save_native_installer_state(target_root="/", state="OOBE_PENDING", data=None
     existing = load_native_installer_state(target_root)
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+    is_installed = state in ["INSTALLATION_COMPLETE", "OOBE_PENDING", "OOBE_IN_PROGRESS", "OOBE_COMPLETE", "DESKTOP_READY"]
+    is_oobe_done = state in ["OOBE_COMPLETE", "DESKTOP_READY"]
+
+    target_disk = (data or {}).get("targetDisk") or existing.get("targetDisk")
+    locale_cfg = (data or {}).get("localeConfig") or existing.get("localeConfig", {})
+
+    if state in ["INSTALLER", "INSTALLATION_IN_PROGRESS", "INSTALLATION_COMPLETE", "OOBE_PENDING"]:
+        user_cfg = None
+    elif state in ["OOBE_COMPLETE", "DESKTOP_READY"]:
+        user_cfg = (data or {}).get("userConfig") or existing.get("userConfig")
+    else:
+        user_cfg = (data or {}).get("userConfig") if (data and "userConfig" in data) else existing.get("userConfig")
+
+    if user_cfg and isinstance(user_cfg, dict):
+        user_cfg = dict(user_cfg)
+        user_cfg.pop("password", None)
+        user_cfg.pop("confirmPassword", None)
+
+    inst_completed_at = existing.get("installationCompletedAt") or ((data or {}).get("installationCompletedAt") if data else None)
+    if is_installed and not inst_completed_at:
+        inst_completed_at = now
+
+    oobe_completed_at = existing.get("oobeCompletedAt") or ((data or {}).get("oobeCompletedAt") if data else None)
+    if is_oobe_done and not oobe_completed_at:
+        oobe_completed_at = now
+
     merged_data = {
         "version": STATE_VERSION,
         "state": state,
         "updatedAt": now,
-        "targetDisk": (data or {}).get("targetDisk") or existing.get("targetDisk"),
-        "localeConfig": (data or {}).get("localeConfig") or existing.get("localeConfig", {}),
-        "userConfig": (data or {}).get("userConfig") or existing.get("userConfig"),
-        "completedAt": now if state in ["OOBE_PENDING", "OOBE_COMPLETE", "DESKTOP_READY"] else existing.get("completedAt"),
-        "error": (data or {}).get("error")
+        "targetDisk": target_disk,
+        "localeConfig": locale_cfg,
+        "userConfig": user_cfg,
+        "installationCompleted": is_installed,
+        "installationCompletedAt": inst_completed_at,
+        "oobeCompleted": is_oobe_done,
+        "oobeCompletedAt": oobe_completed_at,
+        "completedAt": oobe_completed_at if is_oobe_done else (inst_completed_at if is_installed else None),
+        "error": (data or {}).get("error") if state == "FAILED" else None
     }
 
-    if merged_data["userConfig"] and isinstance(merged_data["userConfig"], dict):
-        merged_data["userConfig"].pop("password", None)
-        merged_data["userConfig"].pop("confirmPassword", None)
+    is_valid, val_err = validate_native_installer_state_data(merged_data)
+    if not is_valid:
+        _log_installer(f"ERROR: Generated invalid native installer state for '{state}': {val_err}")
+        raise ValueError(f"Invalid state data generated for '{state}': {val_err}")
 
     with open(tmppath, "w") as f:
         json.dump(merged_data, f, indent=2)
@@ -4287,8 +4394,10 @@ def execute_installer_plan_impl(body: dict):
             try:
                 with open(state_filepath, "r") as f:
                     read_state = json.load(f)
-                    if read_state.get("state") != "OOBE_PENDING" or not read_state.get("installationCompleted"):
-                        raise RuntimeError(f"VERIFICATION_FAILED: Invalid persisted state data on target: {read_state}")
+
+                is_valid, val_err = validate_native_installer_state_data(read_state)
+                if not is_valid or read_state.get("state") != "OOBE_PENDING":
+                    raise RuntimeError(f"VERIFICATION_FAILED: Invalid persisted state data on target: {val_err or read_state}")
             except Exception as se:
                 raise RuntimeError(f"VERIFICATION_FAILED: Could not read back target installer-state.json: {se}")
 

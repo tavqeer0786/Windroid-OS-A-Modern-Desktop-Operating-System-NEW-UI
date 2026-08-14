@@ -175,9 +175,13 @@ export interface NativeInstallerStateResponse {
     username?: string;
     fullName?: string;
     deviceName?: string;
-  };
-  completedAt?: string;
-  error?: string;
+  } | null;
+  installationCompleted?: boolean;
+  installationCompletedAt?: string | null;
+  oobeCompleted?: boolean;
+  oobeCompletedAt?: string | null;
+  completedAt?: string | null;
+  error?: string | null;
   runtimeMode?: string;
 }
 

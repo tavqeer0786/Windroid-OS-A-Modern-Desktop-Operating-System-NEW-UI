@@ -48,12 +48,24 @@ def save_state_in_progress(state_data):
     try:
         state_data["state"] = "OOBE_IN_PROGRESS"
         state_data["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        state_data["installationCompleted"] = True
+        state_data["oobeCompleted"] = False
+        dirpath = os.path.dirname(STATE_FILE)
+        os.makedirs(dirpath, exist_ok=True)
         tmppath = STATE_FILE + ".tmp"
         with open(tmppath, "w") as f:
             json.dump(state_data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmppath, STATE_FILE)
+        try:
+            dfd = os.open(dirpath, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except Exception:
+            pass
     except Exception as e:
         log(f"Warning: Could not save OOBE_IN_PROGRESS state: {e}")
 

@@ -1022,7 +1022,7 @@ const InstallWindroidContent: React.FC<InstallWindroidScreenProps> = ({
                   Installation Complete
                 </h2>
                 <p className="text-sm text-slate-600 max-w-md mx-auto leading-relaxed">
-                  Windroid OS has been successfully installed on your computer. You can restart now to boot into your new OS setup.
+                  Windroid OS has been successfully installed on your computer. Please remove or unmount the installation media (ISO/USB) before rebooting so your system boots directly into your new Windroid OS.
                 </p>
               </div>
 

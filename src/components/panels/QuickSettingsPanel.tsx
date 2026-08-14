@@ -8,7 +8,10 @@ import {
   Plane, 
   BatteryCharging, 
   Eye, 
+  Volume,
+  Volume1,
   Volume2, 
+  VolumeX,
   ChevronRight,
   Pencil,
   Settings,
@@ -109,21 +112,52 @@ interface Win11SliderProps {
   max?: number;
   onChange: (value: number) => void;
   icon: React.ReactNode;
+  onIconClick?: () => void;
+  iconTitle?: string;
   rightElement?: React.ReactNode;
+  ariaLabel: string;
 }
 
-function Win11Slider({ value, min = 0, max = 100, onChange, icon, rightElement }: Win11SliderProps) {
+function Win11Slider({
+  value,
+  min = 0,
+  max = 100,
+  onChange,
+  icon,
+  onIconClick,
+  iconTitle,
+  rightElement,
+  ariaLabel
+}: Win11SliderProps) {
   const percentage = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
 
   return (
     <div className="flex items-center gap-3 w-full">
-      <span className="text-slate-700 dark:text-slate-300 shrink-0">{icon}</span>
+      {onIconClick ? (
+        <button
+          type="button"
+          onClick={onIconClick}
+          className="p-1 rounded-md hover:bg-black/5 dark:hover:bg-white/10 text-slate-700 dark:text-slate-300 transition-colors shrink-0 cursor-pointer focus:outline-none"
+          title={iconTitle}
+          aria-label={iconTitle || ariaLabel}
+        >
+          {icon}
+        </button>
+      ) : (
+        <div className="p-1 text-slate-700 dark:text-slate-300 shrink-0" title={iconTitle}>
+          {icon}
+        </div>
+      )}
       <div className="relative flex-1 flex items-center h-6">
         <input
           type="range"
           min={min}
           max={max}
           value={value}
+          aria-label={ariaLabel}
+          aria-valuenow={value}
+          aria-valuemin={min}
+          aria-valuemax={max}
           onChange={(e) => onChange(Number(e.target.value))}
           style={{
             background: `linear-gradient(to right, #0067c0 0%, #0067c0 ${percentage}%, #8a8a8a ${percentage}%, #8a8a8a 100%)`
@@ -160,6 +194,9 @@ export const QuickSettingsPanel: React.FC = () => {
     radioCapabilities,
     powerStatus,
     updateQuickSettings, 
+    setDisplayBrightness,
+    setAudioVolume,
+    toggleAudioMute,
     toggleWifi,
     toggleBluetooth,
     toggleHotspot,
@@ -174,6 +211,21 @@ export const QuickSettingsPanel: React.FC = () => {
   const wifiDisabled = radioCapabilities.loading || !radioCapabilities.wifiAdapterPresent || radioCapabilities.wifiHardwareBlocked;
   const bluetoothDisabled = radioCapabilities.loading || !radioCapabilities.bluetoothAdapterPresent || radioCapabilities.bluetoothHardwareBlocked || !radioCapabilities.bluezAvailable;
   const hotspotDisabled = radioCapabilities.loading || !radioCapabilities.hotspotAvailable;
+
+  const isMuted = quickSettings.volumeMuted || quickSettings.volume === 0;
+
+  const getVolumeIcon = () => {
+    if (isMuted) {
+      return <VolumeX className="w-4 h-4 text-slate-500 dark:text-slate-400" />;
+    }
+    if (quickSettings.volume <= 33) {
+      return <Volume className="w-4 h-4 text-slate-700 dark:text-slate-300" />;
+    }
+    if (quickSettings.volume <= 66) {
+      return <Volume1 className="w-4 h-4 text-slate-700 dark:text-slate-300" />;
+    }
+    return <Volume2 className="w-4 h-4 text-slate-700 dark:text-slate-300" />;
+  };
 
   return (
     <div 
@@ -267,19 +319,24 @@ export const QuickSettingsPanel: React.FC = () => {
         {/* Brightness Slider */}
         <Win11Slider
           value={quickSettings.brightness}
-          min={10}
+          min={0}
           max={100}
-          onChange={(val) => updateQuickSettings({ brightness: val })}
+          ariaLabel="Brightness"
+          onChange={(val) => setDisplayBrightness(val)}
           icon={<Sun className="w-4 h-4 text-slate-700 dark:text-slate-300" />}
+          iconTitle={`Brightness: ${quickSettings.brightness}%`}
         />
 
         {/* Volume Slider */}
         <Win11Slider
-          value={quickSettings.volume}
+          value={quickSettings.volumeMuted ? 0 : quickSettings.volume}
           min={0}
           max={100}
-          onChange={(val) => updateQuickSettings({ volume: val })}
-          icon={<Volume2 className="w-4 h-4 text-slate-700 dark:text-slate-300" />}
+          ariaLabel="Volume"
+          onChange={(val) => setAudioVolume(val, false)}
+          icon={getVolumeIcon()}
+          onIconClick={toggleAudioMute}
+          iconTitle={isMuted ? 'Unmute volume' : `Mute volume (${quickSettings.volume}%)`}
           rightElement={
             <button 
               type="button"

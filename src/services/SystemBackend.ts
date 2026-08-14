@@ -12,7 +12,7 @@ import {
   NativeInstallerStateResponse
 } from '../types/installer';
 import { RuntimeMode } from '../types/user-session';
-import { PowerAction } from '../types/hardware';
+import { PowerAction, DisplayInfo, AudioStatus, SystemCapabilities, PowerStatus, DEFAULT_SYSTEM_CAPABILITIES } from '../types/hardware';
 
 export function formatPartitionDevice(targetDisk: string, partNumber: number): string {
   if (!targetDisk) return '';
@@ -59,6 +59,17 @@ export interface SystemBackend {
   setKeyboardLayout(layout: string): Promise<{ success: boolean; error?: string }>;
   getRuntimeMode(): Promise<RuntimeMode>;
   subscribeInstallerProgress(onProgress: (status: InstallerStatus) => void): () => void;
+
+  // Real Hardware Display & Audio Controls
+  getDisplayInfo(): Promise<DisplayInfo>;
+  setDisplayBrightness(brightness: number): Promise<{ success: boolean; brightness: number; hardware?: boolean }>;
+  setDisplayNightLight(active: boolean, temperature?: number): Promise<{ success: boolean; active: boolean; temperature?: number }>;
+  configureDisplay(config: { displayId?: string; id?: string; resolution: string; refreshRate?: number | string; orientation?: string; isPrimary?: boolean }): Promise<{ success: boolean; error?: string }>;
+  getAudioStatus(): Promise<AudioStatus>;
+  setAudioVolume(volume: number, isMuted?: boolean, target?: 'output' | 'input'): Promise<{ success: boolean; volume: number; target?: string }>;
+  setAudioDefaultDevice(deviceId: string, target?: 'output' | 'input'): Promise<{ success: boolean; error?: string }>;
+  getCapabilities(): Promise<SystemCapabilities>;
+  getPowerStatus(): Promise<PowerStatus>;
 }
 
 export class NativeSystemBackend implements SystemBackend {
@@ -140,6 +151,42 @@ export class NativeSystemBackend implements SystemBackend {
 
   public async getRuntimeMode() {
     return await this.bridge.getRuntimeMode();
+  }
+
+  public async getDisplayInfo(): Promise<DisplayInfo> {
+    return await this.bridge.getDisplayInfo();
+  }
+
+  public async setDisplayBrightness(brightness: number): Promise<{ success: boolean; brightness: number; hardware?: boolean }> {
+    return await this.bridge.setDisplayBrightness(brightness);
+  }
+
+  public async setDisplayNightLight(active: boolean, temperature?: number): Promise<{ success: boolean; active: boolean; temperature?: number }> {
+    return await this.bridge.setDisplayNightLight(active, temperature);
+  }
+
+  public async configureDisplay(config: { displayId?: string; id?: string; resolution: string; refreshRate?: number | string; orientation?: string; isPrimary?: boolean }): Promise<{ success: boolean; error?: string }> {
+    return await this.bridge.configureDisplay(config);
+  }
+
+  public async getAudioStatus(): Promise<AudioStatus> {
+    return await this.bridge.getAudioStatus();
+  }
+
+  public async setAudioVolume(volume: number, isMuted?: boolean, target?: 'output' | 'input'): Promise<{ success: boolean; volume: number; target?: string }> {
+    return await this.bridge.setAudioVolume(volume, isMuted, target);
+  }
+
+  public async setAudioDefaultDevice(deviceId: string, target?: 'output' | 'input'): Promise<{ success: boolean; error?: string }> {
+    return await this.bridge.setAudioDefaultDevice(deviceId, target);
+  }
+
+  public async getCapabilities(): Promise<SystemCapabilities> {
+    return await this.bridge.getCapabilities();
+  }
+
+  public async getPowerStatus(): Promise<PowerStatus> {
+    return await this.bridge.getPowerStatus();
   }
 
   public subscribeInstallerProgress(onProgress: (status: InstallerStatus) => void): () => void {
@@ -489,6 +536,154 @@ export class BrowserMockSystemBackend implements SystemBackend {
 
   public async getRuntimeMode(): Promise<RuntimeMode> {
     return 'browser-development';
+  }
+
+  public async getDisplayInfo(): Promise<DisplayInfo> {
+    const rawSaved = localStorage.getItem('windroid_display_brightness');
+    const brightness = rawSaved !== null ? parseInt(rawSaved, 10) : 100;
+    const rawNightLight = localStorage.getItem('windroid_nightlight');
+    const isNight = rawNightLight === 'true';
+
+    return {
+      displays: [
+        {
+          id: 'VIRTUAL-1',
+          name: 'Windroid Virtual Screen',
+          connector: 'eDP-1',
+          currentResolution: '1920x1080',
+          availableResolutions: ['1920x1080', '1600x900', '1366x768', '1280x720'],
+          refreshRates: [60],
+          currentRefreshRate: 60,
+          primary: true,
+          isPrimary: true,
+          activeRefreshRate: '60.0',
+          orientation: 'normal',
+          scaling: 1.0,
+          physicalSize: '15.6 inch'
+        }
+      ],
+      gpu: 'Windroid Virtual GPU Accelerated (Mesa / LLVMpipe)',
+      brightness,
+      hardwareBrightnessSupported: false,
+      hasHardwareBacklight: false,
+      nightLightSupported: true,
+      nightLightActive: isNight,
+      nightLightTemperature: 4500
+    };
+  }
+
+  public async setDisplayBrightness(brightness: number): Promise<{ success: boolean; brightness: number; hardware?: boolean }> {
+    const clamped = Math.max(0, Math.min(100, brightness));
+    try {
+      localStorage.setItem('windroid_display_brightness', String(clamped));
+    } catch (_) {}
+    return { success: true, brightness: clamped, hardware: false };
+  }
+
+  public async setDisplayNightLight(active: boolean, temperature?: number): Promise<{ success: boolean; active: boolean; temperature?: number }> {
+    try {
+      localStorage.setItem('windroid_nightlight', String(active));
+      if (temperature) {
+        localStorage.setItem('windroid_nightlight_temp', String(temperature));
+      }
+    } catch (_) {}
+    return { success: true, active, temperature: temperature || 4500 };
+  }
+
+  public async configureDisplay(config: { displayId?: string; id?: string; resolution: string; refreshRate?: number | string; orientation?: string; isPrimary?: boolean }): Promise<{ success: boolean; error?: string }> {
+    return { success: true };
+  }
+
+  public async getAudioStatus(): Promise<AudioStatus> {
+    const rawVol = localStorage.getItem('windroid_audio_volume');
+    const volume = rawVol !== null ? parseInt(rawVol, 10) : 80;
+    const isMuted = localStorage.getItem('windroid_audio_muted') === 'true';
+
+    return {
+      isAudioAvailable: true,
+      masterVolume: volume,
+      isMuted,
+      micVolume: 100,
+      isMicMuted: false,
+      defaultOutputId: 'mock-speakers',
+      defaultInputId: 'mock-mic',
+      outputs: [
+        {
+          id: 'mock-speakers',
+          name: 'Speakers (Windroid High Definition Audio)',
+          description: 'Default System Output Sink',
+          active: true,
+          isActive: true,
+          volume,
+          muted: isMuted
+        },
+        {
+          id: 'mock-headphones',
+          name: 'Headphones (Stereo Output)',
+          description: 'Front 3.5mm Headphone Jack',
+          active: false,
+          isActive: false,
+          volume,
+          muted: false
+        }
+      ],
+      inputs: [
+        {
+          id: 'mock-mic',
+          name: 'Internal Microphone Array',
+          description: 'Front Microphone Input',
+          active: true,
+          isActive: true,
+          volume: 100,
+          muted: false
+        }
+      ]
+    };
+  }
+
+  public async setAudioVolume(volume: number, isMuted?: boolean, target?: 'output' | 'input'): Promise<{ success: boolean; volume: number; target?: string }> {
+    const clamped = Math.max(0, Math.min(100, volume));
+    try {
+      localStorage.setItem('windroid_audio_volume', String(clamped));
+      if (isMuted !== undefined) {
+        localStorage.setItem('windroid_audio_muted', String(isMuted));
+      }
+    } catch (_) {}
+    return { success: true, volume: clamped, target: target || 'output' };
+  }
+
+  public async setAudioDefaultDevice(deviceId: string, target?: 'output' | 'input'): Promise<{ success: boolean; error?: string }> {
+    return { success: true };
+  }
+
+  public async getCapabilities(): Promise<SystemCapabilities> {
+    return {
+      wifi: true,
+      bluetooth: true,
+      hotspot: true,
+      displayConfig: true,
+      hardwareBrightness: false,
+      audioOutput: true,
+      audioInput: true,
+      battery: true,
+      suspend: true,
+      nightLight: true,
+      powerManagement: true,
+      isNative: false
+    };
+  }
+
+  public async getPowerStatus(): Promise<PowerStatus> {
+    return {
+      hasBattery: true,
+      chargingState: 'charging',
+      batteryPercent: 95,
+      acConnected: true,
+      healthPercent: 100,
+      estimatedTimeRemainingMinutes: 240,
+      batterySaverActive: false,
+      isDesktopOrVM: false
+    };
   }
 
   public subscribeInstallerProgress(onProgress: (status: InstallerStatus) => void): () => void {

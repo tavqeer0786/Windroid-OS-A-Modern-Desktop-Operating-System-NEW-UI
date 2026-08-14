@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode, useMemo, useRef } from 'react';
 import { 
   AppId, AppMetadata, WindowState, OSNotification, NewNotification, QuickSettingsState, 
   Wallpaper, SystemAgentMessage, ContextMenuState, ConfirmModalState, QuickAction,
@@ -16,6 +16,7 @@ import {
   DEFAULT_SYSTEM_CAPABILITIES
 } from '../types/hardware';
 import { WindroidSystemBridge } from '../services/WindroidSystemBridge';
+import { getSystemBackend } from '../services/SystemBackend';
 import { StartupResolver } from '../services/StartupResolver';
 import { INITIAL_APPS, INITIAL_NOTIFICATIONS, WALLPAPERS } from '../data/initialData';
 import { getSavedWallpaperId, saveWallpaperId, getWallpaperById } from '../data/wallpapers';
@@ -89,6 +90,7 @@ interface OSContextType {
   refreshHardwareState: () => Promise<void>;
   setDisplayBrightness: (val: number) => Promise<void>;
   setAudioVolume: (val: number, isMuted?: boolean) => Promise<void>;
+  toggleAudioMute: () => Promise<void>;
   setNightLight: (active: boolean) => Promise<void>;
   setBatterySaver: (enabled: boolean) => Promise<void>;
 
@@ -437,16 +439,57 @@ export const OSProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     }
   }, []);
 
+  const brightnessDebounceRef = useRef<NodeJS.Timeout | null>(null);
+  const volumeDebounceRef = useRef<NodeJS.Timeout | null>(null);
+
   const setDisplayBrightness = useCallback(async (val: number) => {
-    setQuickSettings((prev) => ({ ...prev, brightness: val }));
-    const bridge = WindroidSystemBridge.getInstance();
-    await bridge.setDisplayBrightness(val);
+    const clamped = Math.max(0, Math.min(100, val));
+    setQuickSettings((prev) => ({ ...prev, brightness: clamped }));
+
+    if (brightnessDebounceRef.current) {
+      clearTimeout(brightnessDebounceRef.current);
+    }
+    brightnessDebounceRef.current = setTimeout(async () => {
+      try {
+        const backend = getSystemBackend();
+        await backend.setDisplayBrightness(clamped);
+      } catch (err) {
+        console.warn('[OSContext] Failed to set brightness:', err);
+      }
+    }, 40);
   }, []);
 
   const setAudioVolume = useCallback(async (val: number, isMuted?: boolean) => {
-    setQuickSettings((prev) => ({ ...prev, volume: val, volumeMuted: isMuted ?? prev.volumeMuted }));
-    const bridge = WindroidSystemBridge.getInstance();
-    await bridge.setAudioVolume(val, isMuted);
+    const clamped = Math.max(0, Math.min(100, val));
+    setQuickSettings((prev) => ({
+      ...prev,
+      volume: clamped,
+      volumeMuted: isMuted !== undefined ? isMuted : (clamped === 0 ? true : prev.volumeMuted)
+    }));
+
+    if (volumeDebounceRef.current) {
+      clearTimeout(volumeDebounceRef.current);
+    }
+    volumeDebounceRef.current = setTimeout(async () => {
+      try {
+        const backend = getSystemBackend();
+        await backend.setAudioVolume(clamped, isMuted);
+      } catch (err) {
+        console.warn('[OSContext] Failed to set audio volume:', err);
+      }
+    }, 40);
+  }, []);
+
+  const toggleAudioMute = useCallback(async () => {
+    setQuickSettings((prev) => {
+      const nextMuted = !prev.volumeMuted;
+      const targetVol = prev.volume;
+      const backend = getSystemBackend();
+      backend.setAudioVolume(targetVol, nextMuted).catch((err) => {
+        console.warn('[OSContext] Failed to toggle mute:', err);
+      });
+      return { ...prev, volumeMuted: nextMuted };
+    });
   }, []);
 
   const setNightLight = useCallback(async (active: boolean) => {
@@ -1310,6 +1353,7 @@ export const OSProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
       refreshHardwareState,
       setDisplayBrightness,
       setAudioVolume,
+      toggleAudioMute,
       setNightLight,
       setBatterySaver,
 

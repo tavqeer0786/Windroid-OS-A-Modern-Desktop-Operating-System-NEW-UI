@@ -386,5 +386,52 @@ class TestFirstBootOrchestratorAndOobeHandoff(unittest.TestCase):
             content = f.read()
         self.assertNotIn("WINDROID_BOOTX64_STUB", content, "Fake bootloader binary stub found in windroid-bridge.py")
 
+    def test_state_machine_valid_and_invalid_transitions(self):
+        # Valid transitions
+        self.assertTrue(wb.is_valid_state_transition("INSTALLER", "INSTALLATION_IN_PROGRESS"))
+        self.assertTrue(wb.is_valid_state_transition("INSTALLATION_IN_PROGRESS", "INSTALLATION_COMPLETE"))
+        self.assertTrue(wb.is_valid_state_transition("INSTALLATION_COMPLETE", "OOBE_PENDING"))
+        self.assertTrue(wb.is_valid_state_transition("OOBE_PENDING", "OOBE_IN_PROGRESS"))
+        self.assertTrue(wb.is_valid_state_transition("OOBE_IN_PROGRESS", "OOBE_COMPLETE"))
+        self.assertTrue(wb.is_valid_state_transition("OOBE_COMPLETE", "DESKTOP_READY"))
+        self.assertTrue(wb.is_valid_state_transition("INSTALLER", "FAILED"))
+        self.assertTrue(wb.is_valid_state_transition("INSTALLATION_IN_PROGRESS", "FAILED"))
+        self.assertTrue(wb.is_valid_state_transition("OOBE_PENDING", "FAILED"))
+
+        # Invalid transitions
+        self.assertFalse(wb.is_valid_state_transition("DESKTOP_READY", "OOBE_PENDING"))
+        self.assertFalse(wb.is_valid_state_transition("DESKTOP_READY", "INSTALLER"))
+        self.assertFalse(wb.is_valid_state_transition("OOBE_COMPLETE", "INSTALLATION_IN_PROGRESS"))
+        self.assertFalse(wb.is_valid_state_transition("INSTALLATION_COMPLETE", "INSTALLER"))
+        self.assertFalse(wb.is_valid_state_transition("DESKTOP_READY", "INSTALLATION_IN_PROGRESS"))
+
+    def test_partition_naming_for_all_supported_devices(self):
+        self.assertEqual(wb.format_partition_device_path("/dev/sda", 1), "/dev/sda1")
+        self.assertEqual(wb.format_partition_device_path("/dev/sda", 2), "/dev/sda2")
+        self.assertEqual(wb.format_partition_device_path("/dev/vda", 1), "/dev/vda1")
+        self.assertEqual(wb.format_partition_device_path("/dev/vda", 2), "/dev/vda2")
+        self.assertEqual(wb.format_partition_device_path("/dev/nvme0n1", 1), "/dev/nvme0n1p1")
+        self.assertEqual(wb.format_partition_device_path("/dev/nvme0n1", 2), "/dev/nvme0n1p2")
+        self.assertEqual(wb.format_partition_device_path("/dev/mmcblk0", 1), "/dev/mmcblk0p1")
+        self.assertEqual(wb.format_partition_device_path("/dev/mmcblk0", 2), "/dev/mmcblk0p2")
+        self.assertEqual(wb.format_partition_device_path("/dev/loop0", 1), "/dev/loop0p1")
+
+    def test_illegal_state_transition_raises_error_in_save(self):
+        tmp_target = tempfile.mkdtemp()
+        try:
+            # 1. Start with DESKTOP_READY
+            res = wb.save_native_installer_state(tmp_target, "DESKTOP_READY", {
+                "targetDisk": "/dev/sda",
+                "userConfig": {"username": "user1"}
+            })
+            self.assertTrue(res["success"])
+            self.assertEqual(res["state"], "DESKTOP_READY")
+
+            # 2. Attempt illegal transition to OOBE_PENDING
+            with self.assertRaises(ValueError):
+                wb.save_native_installer_state(tmp_target, "OOBE_PENDING", {})
+        finally:
+            shutil.rmtree(tmp_target, ignore_errors=True)
+
 if __name__ == "__main__":
     unittest.main()

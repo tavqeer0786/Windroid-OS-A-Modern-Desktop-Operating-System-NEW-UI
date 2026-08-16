@@ -249,6 +249,8 @@ def validate_native_installer_state_data(data: dict) -> tuple[bool, str | None]:
             return False, "installationCompleted must be false for INSTALLER state"
         if data.get("oobeCompleted") is True:
             return False, "oobeCompleted must be false for INSTALLER state"
+        if data.get("userConfig") is not None:
+            return False, "userConfig must be null for INSTALLER state"
         return True, None
 
     # 1. INSTALLATION_IN_PROGRESS
@@ -261,18 +263,18 @@ def validate_native_installer_state_data(data: dict) -> tuple[bool, str | None]:
             return False, "oobeCompleted must be false during INSTALLATION_IN_PROGRESS"
         return True, None
 
-    # 2. OOBE_PENDING
-    if state == "OOBE_PENDING":
+    # 2. OOBE_PENDING / INSTALLATION_COMPLETE
+    if state in ["OOBE_PENDING", "INSTALLATION_COMPLETE"]:
         if data.get("userConfig") is not None:
-            return False, "userConfig must be null in OOBE_PENDING state before user registration"
+            return False, f"userConfig must be null in {state} state before user registration"
         if data.get("installationCompleted") is not True:
-            return False, "installationCompleted must be true for OOBE_PENDING"
+            return False, f"installationCompleted must be true for {state}"
         if data.get("oobeCompleted") is True:
-            return False, "oobeCompleted must be false for OOBE_PENDING"
+            return False, f"oobeCompleted must be false for {state}"
         if not (data.get("installationCompletedAt") or data.get("completedAt") or data.get("updatedAt")):
-            return False, "Timestamp (installationCompletedAt) must be present for OOBE_PENDING"
+            return False, f"Timestamp (installationCompletedAt) must be present for {state}"
         if data.get("error") is not None:
-            return False, "error must be null for OOBE_PENDING"
+            return False, f"error must be null for {state}"
         return True, None
 
     # 3. OOBE_IN_PROGRESS
@@ -311,16 +313,46 @@ def validate_native_installer_state_data(data: dict) -> tuple[bool, str | None]:
     if state == "FAILED":
         return True, None
 
-    # 6. INSTALLER / INSTALLATION_COMPLETE
     return True, None
 
 def load_native_installer_state(target_root="/"):
-    filepath = os.path.join(target_root, "var/lib/windroid/installer-state.json")
-    if not os.path.exists(filepath):
-        if target_root == "/" and os.path.exists("/mnt/windroid-target/var/lib/windroid/installer-state.json"):
-            filepath = "/mnt/windroid-target/var/lib/windroid/installer-state.json"
+    primary_filepath = os.path.join(target_root, "var/lib/windroid/installer-state.json")
+    backup_filepath = os.path.join(target_root, "var/lib/windroid/installation-state.json")
 
-    if not os.path.exists(filepath):
+    # 1. Try Primary
+    if os.path.exists(primary_filepath):
+        try:
+            with open(primary_filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                valid, err = validate_native_installer_state_data(data)
+                if valid:
+                    res = dict(data)
+                    res["success"] = True
+                    return res
+                else:
+                    _log_installer(f"Warning: Primary state file {primary_filepath} failed validation: {err}")
+        except Exception as e:
+            _log_installer(f"Failed to read native installer primary state file {primary_filepath}: {e}")
+
+    # 2. Try Backup
+    if os.path.exists(backup_filepath):
+        try:
+            with open(backup_filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                valid, err = validate_native_installer_state_data(data)
+                if valid:
+                    _log_installer(f"Recovery: Recovered valid state from backup {backup_filepath}")
+                    res = dict(data)
+                    res["success"] = True
+                    return res
+                else:
+                    _log_installer(f"Warning: Backup state file {backup_filepath} failed validation: {err}")
+        except Exception as e:
+            _log_installer(f"Failed to read native installer backup state file {backup_filepath}: {e}")
+
+    # 3. Default state based on runtime environment
+    is_live = is_live_system() if target_root == "/" else False
+    if is_live:
         return {
             "success": True,
             "version": STATE_VERSION,
@@ -337,22 +369,12 @@ def load_native_installer_state(target_root="/"):
             "error": None
         }
 
-    try:
-        with open(filepath, "r") as f:
-            data = json.load(f)
-            if isinstance(data, dict) and "state" in data:
-                res = dict(data)
-                res["success"] = True
-                return res
-    except Exception as e:
-        _log_installer(f"Failed to read native installer state file {filepath}: {e}")
-
     return {
         "success": False,
         "version": STATE_VERSION,
         "state": "FAILED",
         "updatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "error": f"Corrupted state file at {filepath}"
+        "error": f"Corrupted or missing state file at {primary_filepath}"
     }
 
 def save_native_installer_state(target_root="/", state="OOBE_PENDING", data=None):
@@ -362,6 +384,7 @@ def save_native_installer_state(target_root="/", state="OOBE_PENDING", data=None
     dirpath = os.path.join(target_root, "var/lib/windroid")
     os.makedirs(dirpath, exist_ok=True)
     filepath = os.path.join(dirpath, "installer-state.json")
+    backuppath = os.path.join(dirpath, "installation-state.json")
     tmppath = filepath + ".tmp"
 
     existing = load_native_installer_state(target_root)
@@ -413,12 +436,14 @@ def save_native_installer_state(target_root="/", state="OOBE_PENDING", data=None
         _log_installer(f"ERROR: Generated invalid native installer state for '{state}': {val_err}")
         raise ValueError(f"Invalid state data generated for '{state}': {val_err}")
 
-    with open(tmppath, "w") as f:
+    # Write primary file atomically
+    with open(tmppath, "w", encoding="utf-8") as f:
         json.dump(merged_data, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
 
     os.replace(tmppath, filepath)
+    shutil.copy2(filepath, backuppath)
 
     try:
         dfd = os.open(dirpath, os.O_RDONLY)
@@ -429,14 +454,24 @@ def save_native_installer_state(target_root="/", state="OOBE_PENDING", data=None
     except Exception as e:
         _log_installer(f"Directory fsync notice for {dirpath}: {e}")
 
-    if target_root != "/" and os.path.exists("/var/lib"):
-        try:
-            os.makedirs("/var/lib/windroid", exist_ok=True)
-            with open("/var/lib/windroid/installer-state.json", "w") as f:
-                json.dump(merged_data, f, indent=2)
-        except Exception:
-            pass
+    # Read-back verification (Rule #10)
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            rb_primary = json.load(f)
+            rb_p_valid, rb_p_err = validate_native_installer_state_data(rb_primary)
+            if not rb_p_valid:
+                raise RuntimeError(f"Primary state read-back validation failed: {rb_p_err}")
 
+        with open(backuppath, "r", encoding="utf-8") as f:
+            rb_backup = json.load(f)
+            rb_b_valid, rb_b_err = validate_native_installer_state_data(rb_backup)
+            if not rb_b_valid:
+                raise RuntimeError(f"Backup state read-back validation failed: {rb_b_err}")
+    except Exception as e:
+        _log_installer(f"CRITICAL: State persistence read-back verification failed on {dirpath}: {e}")
+        raise RuntimeError(f"CRITICAL: State persistence read-back verification failed: {e}")
+
+    run_command(["sync"])
     merged_data["success"] = True
     return merged_data
 
@@ -506,33 +541,47 @@ def complete_oobe_impl(body: dict):
 
     # Verify real user exists before configuring LightDM
     ok_getent, out_getent, _ = run_command(["getent", "passwd", username])
-    if not ok_getent and not os.path.exists(user_home):
-        return {"success": False, "error": f"Failed to verify creation of user '{username}'."}
+    if not ok_getent or not out_getent.strip() or not os.path.exists(user_home):
+        return {"success": False, "error": f"Failed to verify creation of real user '{username}'."}
 
-    # Configure LightDM for real user autologin
+    # Configure LightDM for real user autologin using write -> validate -> replace
     lightdm_conf_dir = "/etc/lightdm/lightdm.conf.d"
     os.makedirs(lightdm_conf_dir, exist_ok=True)
-    
-    # Remove OOBE & Live autologin configs
-    for old_cfg in ["80-windroid-oobe.conf", "80-windroid-live-autologin.conf"]:
-        old_path = os.path.join(lightdm_conf_dir, old_cfg)
-        if os.path.exists(old_path):
-            try:
-                os.remove(old_path)
-            except Exception:
-                pass
-
     lightdm_conf = os.path.join(lightdm_conf_dir, "80-windroid-autologin.conf")
-    conf_lines = [
-        "# Windroid OS Authenticated User Session Configuration\n",
-        "[Seat:*]\n",
-        "autologin-guest=false\n",
-        f"autologin-user={username}\n",
-        "autologin-user-timeout=0\n",
+    lightdm_tmp = lightdm_conf + ".tmp"
+
+    conf_content = (
+        "# Windroid OS Authenticated User Session Configuration\n"
+        "[Seat:*]\n"
+        "autologin-guest=false\n"
+        f"autologin-user={username}\n"
+        "autologin-user-timeout=0\n"
         "user-session=openbox\n"
-    ]
-    with open(lightdm_conf, "w", encoding="utf-8") as f:
-        f.writelines(conf_lines)
+    )
+
+    try:
+        with open(lightdm_tmp, "w", encoding="utf-8") as f:
+            f.write(conf_content)
+            f.flush()
+            os.fsync(f.fileno())
+
+        with open(lightdm_tmp, "r", encoding="utf-8") as f:
+            if f"autologin-user={username}" not in f.read():
+                raise RuntimeError(f"Validation of LightDM real user configuration failed for '{username}'")
+
+        os.replace(lightdm_tmp, lightdm_conf)
+
+        # Remove OOBE & Live autologin configs
+        for old_cfg in ["80-windroid-oobe.conf", "80-windroid-live-autologin.conf"]:
+            old_path = os.path.join(lightdm_conf_dir, old_cfg)
+            if os.path.exists(old_path):
+                try:
+                    os.remove(old_path)
+                except Exception:
+                    pass
+    except Exception as e:
+        _log_installer(f"FATAL: Error writing LightDM autologin for real user '{username}': {e}")
+        return {"success": False, "error": f"Could not write LightDM autologin configuration: {e}"}
 
     # Persist state atomically
     save_native_installer_state("/", "OOBE_COMPLETE", {
@@ -542,13 +591,17 @@ def complete_oobe_impl(body: dict):
         "userConfig": {"username": username, "fullName": full_name, "deviceName": device_name}
     })
 
-    # Cleanup temporary windroid-oobe account safely
-    try:
-        run_command(["pkill", "-9", "-u", "windroid-oobe"])
-        time.sleep(0.3)
-        run_command(["userdel", "-r", "windroid-oobe"])
-    except Exception as e:
-        _log_installer(f"Notice during temporary user cleanup: {e}")
+    # Cleanup temporary windroid-oobe account safely (only if real user and LightDM config are 100% verified)
+    if os.path.exists(lightdm_conf) and os.path.exists(user_home):
+        try:
+            ok_oobe_check, oobe_out, _ = run_command(["getent", "passwd", "windroid-oobe"])
+            if ok_oobe_check and oobe_out.strip():
+                run_command(["pkill", "-9", "-u", "windroid-oobe"])
+                time.sleep(0.3)
+                run_command(["userdel", "-r", "windroid-oobe"])
+                _log_installer("OOBE: Temporary user 'windroid-oobe' successfully cleaned up.")
+        except Exception as e:
+            _log_installer(f"Notice during temporary user cleanup: {e}")
 
     run_command(["sync"])
     return {"success": True, "username": username, "state": "DESKTOP_READY"}
@@ -3875,6 +3928,7 @@ def _run_native_installation_worker(plan: dict):
     target_disk = plan.get("targetDisk", "")
     target_mount = "/mnt/windroid-target"
     esp_mount = "/mnt/windroid-target/boot/efi"
+    target_mounted = False
 
     try:
         _update_installer_status("in_progress", "preparing_disk", f"Preparing target disk '{target_disk}'...", 5, target_disk=target_disk)
@@ -3883,13 +3937,36 @@ def _run_native_installation_worker(plan: dict):
             "localeConfig": plan.get("localeConfig", {})
         })
 
-        # Pre-flight check: ensure target device exists and is not live media
+        # Pre-flight check 1: Target disk specified and exists
+        if not target_disk:
+            raise RuntimeError("CRITICAL_STEP_FAILED: Target disk is not specified in installation plan.")
+        if not os.path.exists(target_disk):
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Target disk '{target_disk}' does not exist.")
+
+        # Pre-flight check 2: Target is not live media device
         live_dev = find_live_media_device()
-        if live_dev and (target_disk == live_dev or live_dev.startswith(target_disk)):
-            raise RuntimeError(f"ABORTED: Target disk {target_disk} is the live installation media!")
+        if live_dev and (target_disk == live_dev or live_dev.startswith(target_disk) or target_disk.startswith(live_dev)):
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Target disk {target_disk} is the live installation media!")
+
+        # Pre-flight check 3: Target is not read-only
+        dev_base = os.path.basename(target_disk)
+        ro_path = f"/sys/block/{dev_base}/ro"
+        if os.path.exists(ro_path):
+            try:
+                with open(ro_path, "r") as f:
+                    if f.read().strip() == "1":
+                        raise RuntimeError(f"CRITICAL_STEP_FAILED: Target disk '{target_disk}' is read-only!")
+            except Exception as e:
+                if "read-only" in str(e):
+                    raise
+
+        # Pre-flight check 4: Target does not host running root filesystem
+        ok_rootmnt, rootmnt_out, _ = run_command(["findmnt", "-n", "-o", "SOURCE", "/"])
+        if ok_rootmnt and rootmnt_out.strip() and target_disk in rootmnt_out.strip():
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Target disk '{target_disk}' contains the active running root mount ({rootmnt_out.strip()})!")
 
         # Stop active swap
-        run_command(["swapoff", "-a"], timeout=10)
+        run_command(["swapoff", "-a"], timeout=15)
 
         # Unmount any existing mounts on target disk
         ok_mnts, mnts_out, _ = run_command(["findmnt", "-l", "-n", "-o", "TARGET,SOURCE"])
@@ -3900,58 +3977,100 @@ def _run_native_installation_worker(plan: dict):
                     t_mount, t_src = parts[0], parts[1]
                     if target_disk in t_src:
                         _log_installer(f"Unmounting active target mount: {t_mount} ({t_src})")
-                        run_command(["umount", "-f", "-l", t_mount], timeout=10)
+                        run_command(["umount", "-f", "-l", t_mount], timeout=15)
 
-        # Step 2: Partitioning (UEFI + GPT)
+        # Step 2: Partitioning (UEFI + GPT) (Rule #5)
         _update_installer_status("in_progress", "partitioning", "Creating GPT partition table and EFI/Root partitions...", 20)
         
         # Wipe signatures
-        run_command(["wipefs", "-a", target_disk], timeout=15)
-        run_command(["parted", "-s", target_disk, "mklabel", "gpt"], timeout=20)
+        ok_wipe, _, err_wipe = run_command(["wipefs", "-a", target_disk], timeout=30)
+        if not ok_wipe:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: wipefs failed on {target_disk}: {err_wipe}")
+
+        ok_lbl, _, err_lbl = run_command(["parted", "-s", target_disk, "mklabel", "gpt"], timeout=30)
+        if not ok_lbl:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: parted mklabel gpt failed on {target_disk}: {err_lbl}")
         
         # Create ESP (512 MiB FAT32)
-        run_command(["parted", "-s", target_disk, "mkpart", "ESP", "fat32", "1MiB", "513MiB"], timeout=20)
-        run_command(["parted", "-s", target_disk, "set", "1", "esp", "on"], timeout=20)
-        run_command(["parted", "-s", target_disk, "set", "1", "boot", "on"], timeout=20)
+        ok_esp_part, _, err_esp_part = run_command(["parted", "-s", target_disk, "mkpart", "ESP", "fat32", "1MiB", "513MiB"], timeout=30)
+        if not ok_esp_part:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: parted mkpart ESP failed on {target_disk}: {err_esp_part}")
+
+        ok_esp_on, _, err_esp_on = run_command(["parted", "-s", target_disk, "set", "1", "esp", "on"], timeout=30)
+        if not ok_esp_on:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: parted set 1 esp on failed on {target_disk}: {err_esp_on}")
+
+        ok_boot_on, _, err_boot_on = run_command(["parted", "-s", target_disk, "set", "1", "boot", "on"], timeout=30)
+        if not ok_boot_on:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: parted set 1 boot on failed on {target_disk}: {err_boot_on}")
 
         # Create Root (remaining disk space ext4)
-        run_command(["parted", "-s", target_disk, "mkpart", "WindroidOS", "ext4", "513MiB", "100%"], timeout=20)
+        ok_root_part, _, err_root_part = run_command(["parted", "-s", target_disk, "mkpart", "WindroidOS", "ext4", "513MiB", "100%"], timeout=30)
+        if not ok_root_part:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: parted mkpart Root failed on {target_disk}: {err_root_part}")
 
         # Settle kernel device nodes
-        run_command(["partprobe", target_disk], timeout=10)
-        run_command(["udevadm", "settle", "--timeout=10"], timeout=15)
+        run_command(["partprobe", target_disk], timeout=15)
+        run_command(["udevadm", "settle", "--timeout=15"], timeout=20)
         time.sleep(1)
 
         esp_part = format_partition_device_path(target_disk, 1)
         root_part = format_partition_device_path(target_disk, 2)
 
-        # Step 3: Filesystem Creation
+        # Verify partition device nodes exist
+        for _ in range(5):
+            if os.path.exists(esp_part) and os.path.exists(root_part):
+                break
+            time.sleep(1)
+
+        if not os.path.exists(esp_part) or not os.path.exists(root_part):
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Partition device nodes {esp_part} or {root_part} not found after partitioning.")
+
+        # Step 3: Filesystem Creation & Blkid Verification (Rule #6)
         _update_installer_status("in_progress", "formatting", "Formatting EFI FAT32 and Root ext4 filesystems...", 35)
         
-        ok_esp_fmt, _, err_esp = run_command(["mkfs.vfat", "-F32", "-n", "EFI", esp_part], timeout=30)
+        ok_esp_fmt, _, err_esp = run_command(["mkfs.vfat", "-F32", "-n", "EFI", esp_part], timeout=45)
         if not ok_esp_fmt:
-            # Fallback if mkfs.vfat is named mkfs.fat
-            ok_esp_fmt, _, err_esp = run_command(["mkfs.fat", "-F32", "-n", "EFI", esp_part], timeout=30)
+            ok_esp_fmt, _, err_esp = run_command(["mkfs.fat", "-F32", "-n", "EFI", esp_part], timeout=45)
             if not ok_esp_fmt:
-                raise RuntimeError(f"Failed to format EFI system partition ({esp_part}): {err_esp}")
+                raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to format EFI system partition ({esp_part}): {err_esp}")
 
-        ok_root_fmt, _, err_root = run_command(["mkfs.ext4", "-F", "-L", "WindroidOS", root_part], timeout=60)
+        ok_root_fmt, _, err_root = run_command(["mkfs.ext4", "-F", "-L", "WindroidOS", root_part], timeout=90)
         if not ok_root_fmt:
-            raise RuntimeError(f"Failed to format root ext4 partition ({root_part}): {err_root}")
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to format root ext4 partition ({root_part}): {err_root}")
 
-        run_command(["udevadm", "settle", "--timeout=10"], timeout=15)
+        run_command(["udevadm", "settle", "--timeout=15"], timeout=20)
 
-        # Step 4: Mount Target & Deploy OS
+        # Verify UUIDs and Filesystem Types via blkid
+        ok_ruuid, root_uuid, err_ruuid = run_command(["blkid", "-s", "UUID", "-o", "value", root_part])
+        ok_euuid, esp_uuid, err_euuid = run_command(["blkid", "-s", "UUID", "-o", "value", esp_part])
+        root_uuid = root_uuid.strip() if ok_ruuid else ""
+        esp_uuid = esp_uuid.strip() if ok_euuid else ""
+
+        if not ok_ruuid or not root_uuid:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: blkid failed to read root partition UUID on {root_part}: {err_ruuid}")
+        if not ok_euuid or not esp_uuid:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: blkid failed to read ESP partition UUID on {esp_part}: {err_euuid}")
+
+        ok_rtype, root_type, _ = run_command(["blkid", "-s", "TYPE", "-o", "value", root_part])
+        ok_etype, esp_type, _ = run_command(["blkid", "-s", "TYPE", "-o", "value", esp_part])
+        if root_type.strip() != "ext4":
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Root filesystem type mismatch: expected ext4, got '{root_type.strip()}'")
+        if "fat" not in esp_type.strip().lower() and "vfat" not in esp_type.strip().lower():
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: ESP filesystem type mismatch: expected vfat/fat32, got '{esp_type.strip()}'")
+
+        # Step 4: Mount Target & Deploy OS (Rule #4)
         _update_installer_status("in_progress", "deploying_os", "Mounting target filesystem and deploying Windroid OS image...", 50)
         os.makedirs(target_mount, exist_ok=True)
-        ok_m_root, _, err_m_root = run_command(["mount", root_part, target_mount], timeout=15)
+        ok_m_root, _, err_m_root = run_command(["mount", root_part, target_mount], timeout=20)
         if not ok_m_root:
-            raise RuntimeError(f"Failed to mount root partition {root_part} to {target_mount}: {err_m_root}")
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to mount root partition {root_part} to {target_mount}: {err_m_root}")
+        target_mounted = True
 
         os.makedirs(esp_mount, exist_ok=True)
-        ok_m_esp, _, err_m_esp = run_command(["mount", esp_part, esp_mount], timeout=15)
+        ok_m_esp, _, err_m_esp = run_command(["mount", esp_part, esp_mount], timeout=20)
         if not ok_m_esp:
-            raise RuntimeError(f"Failed to mount EFI partition {esp_part} to {esp_mount}: {err_m_esp}")
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to mount EFI partition {esp_part} to {esp_mount}: {err_m_esp}")
 
         # Locate source squashfs image or copy live filesystem
         squashfs_candidates = [
@@ -3965,9 +4084,9 @@ def _run_native_installation_worker(plan: dict):
         if source_squashfs and shutil.which("unsquashfs"):
             _log_installer(f"Deploying from live squashfs image: {source_squashfs}")
             _update_installer_status("in_progress", "deploying_os", "Extracting system files from squashfs image...", 60)
-            ok_unsquash, _, err_unsquash = run_command(["unsquashfs", "-f", "-d", target_mount, source_squashfs], timeout=600)
+            ok_unsquash, _, err_unsquash = run_command(["unsquashfs", "-f", "-d", target_mount, source_squashfs], timeout=900)
             if not ok_unsquash:
-                raise RuntimeError(f"Failed to extract squashfs image: {err_unsquash}")
+                raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to extract squashfs image: {err_unsquash}")
         else:
             _log_installer("Deploying live root filesystem to target with rsync...")
             _update_installer_status("in_progress", "deploying_os", "Copying OS filesystem to target drive...", 60)
@@ -3985,12 +4104,12 @@ def _run_native_installation_worker(plan: dict):
                 "--exclude=/run/live/*",
                 "/", target_mount + "/"
             ]
-            ok_rsync, _, err_rsync = run_command(rsync_cmd, timeout=600)
+            ok_rsync, _, err_rsync = run_command(rsync_cmd, timeout=900)
             if not ok_rsync:
-                _log_installer(f"Notice during rsync: {err_rsync}")
+                raise RuntimeError(f"CRITICAL_STEP_FAILED: rsync filesystem deployment failed: {err_rsync}")
 
         # Ensure skeleton directories exist with appropriate permissions
-        for skel in ["proc", "sys", "dev", "run", "tmp", "mnt", "media", "var/tmp"]:
+        for skel in ["proc", "sys", "dev", "run", "tmp", "mnt", "media", "var/tmp", "var/lib/windroid", "etc/windroid"]:
             skel_dir = os.path.join(target_mount, skel)
             os.makedirs(skel_dir, exist_ok=True)
         os.chmod(os.path.join(target_mount, "tmp"), 0o1777)
@@ -3998,12 +4117,6 @@ def _run_native_installation_worker(plan: dict):
 
         # Step 5: Configure FSTAB and System Configuration
         _update_installer_status("in_progress", "configuring_system", "Generating fstab and applying system configurations...", 75)
-
-        # Query UUIDs
-        ok_ruuid, root_uuid, _ = run_command(["blkid", "-s", "UUID", "-o", "value", root_part])
-        ok_euuid, esp_uuid, _ = run_command(["blkid", "-s", "UUID", "-o", "value", esp_part])
-        root_uuid = root_uuid.strip() if ok_ruuid else ""
-        esp_uuid = esp_uuid.strip() if ok_euuid else ""
 
         fstab_content = [
             "# /etc/fstab: static file system information for Windroid OS",
@@ -4026,7 +4139,7 @@ def _run_native_installation_worker(plan: dict):
         with open(hosts_path, "w", encoding="utf-8") as f:
             f.write(f"127.0.0.1\tlocalhost\n127.0.1.1\t{dev_name}\n\n# The following lines are desirable for IPv6 capable hosts\n::1     localhost ip6-localhost ip6-loopback\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n")
 
-        # Step 5b: Install First-Boot Orchestrator & Systemd Service into Target
+        # Step 5b: Install First-Boot Orchestrator & Systemd Service into Target (Rules #7, #8)
         _update_installer_status("in_progress", "configuring_system", "Installing first-boot orchestrator and systemd units...", 80)
         
         # Install first-boot script
@@ -4039,6 +4152,15 @@ def _run_native_installation_worker(plan: dict):
         if os.path.exists(src_first_boot):
             shutil.copy2(src_first_boot, target_first_boot)
             os.chmod(target_first_boot, 0o755)
+
+        # Install shell runner script
+        src_shell_runner = "/usr/bin/windroid-shell-runner.sh"
+        if not os.path.exists(src_shell_runner):
+            src_shell_runner = os.path.join(os.path.dirname(__file__), "windroid-shell-runner.sh")
+        target_shell_runner = os.path.join(target_mount, "usr/bin/windroid-shell-runner.sh")
+        if os.path.exists(src_shell_runner):
+            shutil.copy2(src_shell_runner, target_shell_runner)
+            os.chmod(target_shell_runner, 0o755)
 
         # Install first-boot systemd service
         src_service = "/etc/systemd/system/windroid-first-boot.service"
@@ -4082,22 +4204,36 @@ def _run_native_installation_worker(plan: dict):
 
         # Bind virtual filesystems for chroot
         _update_installer_status("in_progress", "installing_bootloader", "Installing and configuring GRUB EFI bootloader in chroot...", 85)
-        run_command(["mount", "--bind", "/dev", os.path.join(target_mount, "dev")], timeout=10)
-        run_command(["mount", "--bind", "/dev/pts", os.path.join(target_mount, "dev/pts")], timeout=10)
-        run_command(["mount", "-t", "proc", "proc", os.path.join(target_mount, "proc")], timeout=10)
-        run_command(["mount", "-t", "sysfs", "sys", os.path.join(target_mount, "sys")], timeout=10)
+        ok_bdev, _, err_bdev = run_command(["mount", "--bind", "/dev", os.path.join(target_mount, "dev")], timeout=15)
+        if not ok_bdev:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to bind /dev to target chroot: {err_bdev}")
+        ok_bpts, _, err_bpts = run_command(["mount", "--bind", "/dev/pts", os.path.join(target_mount, "dev/pts")], timeout=15)
+        if not ok_bpts:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to bind /dev/pts to target chroot: {err_bpts}")
+        ok_bproc, _, err_bproc = run_command(["mount", "-t", "proc", "proc", os.path.join(target_mount, "proc")], timeout=15)
+        if not ok_bproc:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to mount proc to target chroot: {err_bproc}")
+        ok_bsys, _, err_bsys = run_command(["mount", "-t", "sysfs", "sys", os.path.join(target_mount, "sys")], timeout=15)
+        if not ok_bsys:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Failed to mount sysfs to target chroot: {err_bsys}")
+
         if os.path.exists("/sys/firmware/efi/efivars"):
             efivars_target = os.path.join(target_mount, "sys/firmware/efi/efivars")
             os.makedirs(efivars_target, exist_ok=True)
-            run_command(["mount", "-t", "efivarfs", "efivarfs", efivars_target], timeout=10)
+            run_command(["mount", "-t", "efivarfs", "efivarfs", efivars_target], timeout=15)
 
-        # Step 6: Bootloader Installation
+        # Step 6: Bootloader Installation (Rule #9)
         ok_grub, _, err_grub = run_command([
             "chroot", target_mount,
             "grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi",
             "--bootloader-id=WindroidOS", "--recheck", "--no-floppy"
-        ], timeout=120)
-        ok_ugrub, _, err_ugrub = run_command(["chroot", target_mount, "update-grub"], timeout=60)
+        ], timeout=180)
+        if not ok_grub:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: grub-install failed in chroot: {err_grub}")
+
+        ok_ugrub, _, err_ugrub = run_command(["chroot", target_mount, "update-grub"], timeout=90)
+        if not ok_ugrub:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: update-grub failed in chroot: {err_ugrub}")
 
         # Ensure fallback UEFI bootloader exists (EFI/BOOT/BOOTX64.EFI)
         fallback_efi_dir = os.path.join(target_mount, "boot/efi/EFI/BOOT")
@@ -4107,19 +4243,48 @@ def _run_native_installation_worker(plan: dict):
         if os.path.exists(grub_installed_file) and not os.path.exists(fallback_efi_file):
             shutil.copy2(grub_installed_file, fallback_efi_file)
 
-        # Step 7: Installation Verification
+        # Step 7: Installation Verification (Rules #7, #8, #9)
         _update_installer_status("in_progress", "verifying", "Verifying installed kernel, fstab, and bootloader integrity...", 95)
         
+        # 1. Base system files
         has_fstab = os.path.exists(fstab_path) and os.path.getsize(fstab_path) > 0
+        has_passwd = os.path.exists(os.path.join(target_mount, "etc/passwd")) and os.path.getsize(os.path.join(target_mount, "etc/passwd")) > 0
+        has_first_boot = os.path.exists(target_first_boot) and os.path.getsize(target_first_boot) > 0 and os.access(target_first_boot, os.X_OK)
+        has_first_boot_svc = os.path.exists(target_service) and os.path.getsize(target_service) > 0
+        has_runtime_mode = os.path.exists(os.path.join(target_mount, "etc/windroid/runtime-mode"))
+        has_wants_symlink = os.path.exists(os.path.join(target_mount, "etc/systemd/system/multi-user.target.wants/windroid-first-boot.service"))
+
+        # 2. Bootloader & Kernel
         has_efi = (os.path.exists(fallback_efi_file) and os.path.getsize(fallback_efi_file) > 0) or \
                   (os.path.exists(grub_installed_file) and os.path.getsize(grub_installed_file) > 0)
-        
-        if not has_fstab:
-            raise RuntimeError("Verification failed: /etc/fstab is missing or empty on target filesystem.")
-        if not has_efi:
-            raise RuntimeError(f"Verification failed: Bootloader EFI binary not found or empty (grub-install error: {err_grub or err_ugrub}).")
+        has_grub_cfg = os.path.exists(os.path.join(target_mount, "boot/grub/grub.cfg")) and os.path.getsize(os.path.join(target_mount, "boot/grub/grub.cfg")) > 0
 
-        # Step 8: Commit Point & Atomic State Persistence
+        boot_dir = os.path.join(target_mount, "boot")
+        has_vmlinuz = any(f.startswith("vmlinuz") for f in os.listdir(boot_dir)) if os.path.exists(boot_dir) else False
+        has_initrd = any(f.startswith("initrd.img") or f.startswith("initramfs") for f in os.listdir(boot_dir)) if os.path.exists(boot_dir) else False
+
+        if not has_fstab:
+            raise RuntimeError("CRITICAL_STEP_FAILED: /etc/fstab is missing or empty on target filesystem.")
+        if not has_passwd:
+            raise RuntimeError("CRITICAL_STEP_FAILED: /etc/passwd is missing or empty on target filesystem.")
+        if not has_first_boot:
+            raise RuntimeError("CRITICAL_STEP_FAILED: windroid-first-boot.py is missing or not executable on target.")
+        if not has_first_boot_svc:
+            raise RuntimeError("CRITICAL_STEP_FAILED: windroid-first-boot.service unit is missing on target.")
+        if not has_wants_symlink:
+            raise RuntimeError("CRITICAL_STEP_FAILED: windroid-first-boot.service is not enabled in multi-user.target.wants on target.")
+        if not has_runtime_mode:
+            raise RuntimeError("CRITICAL_STEP_FAILED: /etc/windroid/runtime-mode is missing on target.")
+        if not has_efi:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Bootloader EFI binary not found or empty on ESP partition.")
+        if not has_grub_cfg:
+            raise RuntimeError("CRITICAL_STEP_FAILED: /boot/grub/grub.cfg is missing or empty on target.")
+        if not has_vmlinuz:
+            raise RuntimeError("CRITICAL_STEP_FAILED: Linux kernel (vmlinuz) not found in /boot on target.")
+        if not has_initrd:
+            raise RuntimeError("CRITICAL_STEP_FAILED: Initial ramdisk (initrd.img) not found in /boot on target.")
+
+        # Step 8: Commit Point & Atomic State Persistence (Rule #10)
         _update_installer_status("in_progress", "committing", "Committing installation state and syncing filesystem buffers...", 98)
         
         save_native_installer_state(target_mount, "OOBE_PENDING", {
@@ -4129,8 +4294,10 @@ def _run_native_installation_worker(plan: dict):
             "oobeCompleted": False
         })
 
-        # Sync buffers
-        run_command(["sync"], timeout=30)
+        # Sync buffers (Rule #10)
+        ok_sync, _, err_sync = run_command(["sync"], timeout=30)
+        if not ok_sync:
+            raise RuntimeError(f"CRITICAL_STEP_FAILED: Final filesystem sync failed: {err_sync}")
 
         # Safely unmount chroot bind mounts and target mounts
         for chroot_mnt in ["sys/firmware/efi/efivars", "sys", "proc", "dev/pts", "dev", "boot/efi", ""]:
@@ -4144,10 +4311,19 @@ def _run_native_installation_worker(plan: dict):
         err_msg = str(e)
         _log_installer(f"INSTALLATION FAILED: {err_msg}")
         _update_installer_status("failed", "failed", f"Installation failed: {err_msg}", _INSTALLER_STATUS.get("progress", 0), error=err_msg)
-        try:
-            save_native_installer_state("/", "FAILED", {"error": err_msg})
-        except Exception:
-            pass
+        
+        # Rule #11: Isolate target failures vs live host
+        if not target_mounted:
+            try:
+                save_native_installer_state("/", "FAILED", {"error": err_msg})
+            except Exception:
+                pass
+        else:
+            try:
+                save_native_installer_state(target_mount, "FAILED", {"error": err_msg})
+            except Exception:
+                pass
+
         # Attempt unmount cleanup
         for chroot_mnt in ["sys/firmware/efi/efivars", "sys", "proc", "dev/pts", "dev", "boot/efi", ""]:
             m_path = os.path.join(target_mount, chroot_mnt).rstrip("/")

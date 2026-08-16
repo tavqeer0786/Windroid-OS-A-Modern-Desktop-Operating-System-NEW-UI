@@ -314,6 +314,72 @@ class TestFirstBootOrchestratorAndOobeHandoff(unittest.TestCase):
         self.assertFalse(fb.cleanup_temporary_oobe_user("root"))
         self.assertFalse(fb.cleanup_temporary_oobe_user("windroid-oobe"))
 
+    def test_save_native_installer_state_creates_primary_and_backup(self):
+        tmp_target = tempfile.mkdtemp()
+        try:
+            res = wb.save_native_installer_state(tmp_target, "OOBE_PENDING", {
+                "targetDisk": "/dev/sdb",
+                "localeConfig": {"language": "en_US.UTF-8"}
+            })
+            self.assertTrue(res["success"])
+            self.assertEqual(res["state"], "OOBE_PENDING")
+            
+            primary = os.path.join(tmp_target, "var/lib/windroid/installer-state.json")
+            backup = os.path.join(tmp_target, "var/lib/windroid/installation-state.json")
+            self.assertTrue(os.path.exists(primary))
+            self.assertTrue(os.path.exists(backup))
+
+            with open(primary, "r") as f:
+                p_data = json.load(f)
+            with open(backup, "r") as f:
+                b_data = json.load(f)
+
+            self.assertEqual(p_data["state"], "OOBE_PENDING")
+            self.assertEqual(b_data["state"], "OOBE_PENDING")
+            self.assertEqual(p_data["targetDisk"], "/dev/sdb")
+            self.assertEqual(b_data["targetDisk"], "/dev/sdb")
+            self.assertTrue(p_data["installationCompleted"])
+            self.assertFalse(p_data["oobeCompleted"])
+        finally:
+            shutil.rmtree(tmp_target, ignore_errors=True)
+
+    def test_load_native_installer_state_recovers_from_backup(self):
+        tmp_target = tempfile.mkdtemp()
+        try:
+            var_lib = os.path.join(tmp_target, "var/lib/windroid")
+            os.makedirs(var_lib, exist_ok=True)
+            primary = os.path.join(var_lib, "installer-state.json")
+            backup = os.path.join(var_lib, "installation-state.json")
+
+            # Corrupt primary
+            with open(primary, "w") as f:
+                f.write("{invalid json")
+
+            # Valid backup
+            backup_data = {
+                "version": "windroid-installer-state-v1",
+                "state": "OOBE_PENDING",
+                "updatedAt": "2026-08-16T12:00:00Z",
+                "targetDisk": "/dev/sda",
+                "localeConfig": {},
+                "userConfig": None,
+                "installationCompleted": True,
+                "installationCompletedAt": "2026-08-16T12:00:00Z",
+                "oobeCompleted": False,
+                "oobeCompletedAt": None,
+                "completedAt": "2026-08-16T12:00:00Z",
+                "error": None
+            }
+            with open(backup, "w") as f:
+                json.dump(backup_data, f)
+
+            loaded = wb.load_native_installer_state(tmp_target)
+            self.assertTrue(loaded["success"])
+            self.assertEqual(loaded["state"], "OOBE_PENDING")
+            self.assertEqual(loaded["targetDisk"], "/dev/sda")
+        finally:
+            shutil.rmtree(tmp_target, ignore_errors=True)
+
     def test_no_fake_bootloader_stubs_in_codebase(self):
         bridge_file = os.path.join(os.path.dirname(__file__), "windroid-bridge.py")
         with open(bridge_file, "r") as f:

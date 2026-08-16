@@ -44,6 +44,22 @@ VALID_STATES = [
     "FAILED"
 ]
 
+ALLOWED_STATE_TRANSITIONS = {
+    "INSTALLER": ["INSTALLER", "INSTALLATION_IN_PROGRESS", "FAILED"],
+    "INSTALLATION_IN_PROGRESS": ["INSTALLATION_IN_PROGRESS", "INSTALLATION_COMPLETE", "FAILED"],
+    "INSTALLATION_COMPLETE": ["INSTALLATION_COMPLETE", "OOBE_PENDING", "FAILED"],
+    "OOBE_PENDING": ["OOBE_PENDING", "OOBE_IN_PROGRESS", "FAILED"],
+    "OOBE_IN_PROGRESS": ["OOBE_IN_PROGRESS", "OOBE_COMPLETE", "FAILED"],
+    "OOBE_COMPLETE": ["OOBE_COMPLETE", "DESKTOP_READY", "FAILED"],
+    "DESKTOP_READY": ["DESKTOP_READY", "FAILED"],
+    "FAILED": ["INSTALLER", "FAILED"]
+}
+
+def is_valid_state_transition(from_state: str, to_state: str) -> bool:
+    if not from_state or from_state not in ALLOWED_STATE_TRANSITIONS:
+        return to_state in VALID_STATES
+    return to_state in ALLOWED_STATE_TRANSITIONS.get(from_state, [])
+
 RESERVED_SYSTEM_USERNAMES = {
     "root", "bin", "daemon", "sys", "sync", "games", "man", "lp", "mail", "news",
     "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody",
@@ -222,6 +238,19 @@ def save_installer_state_atomic(state_data: dict, target_root: str = "/") -> boo
     target_file = os.path.join(target_dir, "installer-state.json")
     backup_file = os.path.join(target_dir, "installation-state.json")
     tmp_file = os.path.join(target_dir, "installer-state.json.tmp")
+
+    # Transition validation
+    if os.path.exists(target_file):
+        try:
+            with open(target_file, "r", encoding="utf-8") as f:
+                prev_data = json.load(f)
+                prev_state = prev_data.get("state")
+                new_state = state_data.get("state")
+                if prev_state and new_state and not is_valid_state_transition(prev_state, new_state):
+                    log(f"ERROR: Illegal state transition attempted from '{prev_state}' to '{new_state}'")
+                    return False
+        except Exception as e:
+            log(f"Notice: Failed to read previous state file for transition check: {e}")
 
     state_data["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     payload = json.dumps(state_data, indent=2)
@@ -518,14 +547,12 @@ def orchestrate_first_boot() -> int:
 
         log(f"Handling state '{current_state}': Verifying real user '{username}'...")
         if not username or username == OOBE_USER or username in RESERVED_SYSTEM_USERNAMES or not user_exists(username):
-            log(f"WARNING: Real user '{username}' is missing or invalid. Re-triggering OOBE flow.")
-            state["state"] = "OOBE_PENDING"
-            state["userConfig"] = None
-            state["oobeCompleted"] = False
+            log(f"FATAL: Real user '{username}' is missing, invalid, or absent from passwd database in state '{current_state}'. Failing closed.")
+            state["state"] = "FAILED"
+            state["error"] = f"Real user '{username}' is missing or invalid"
             save_installer_state_atomic(state)
-            setup_temporary_oobe_user()
-            configure_lightdm_oobe()
-            return 0
+            clear_all_autologin_configs()
+            return 1
 
         # Ensure runtime-mode is 'installed'
         os.makedirs("/etc/windroid", exist_ok=True)

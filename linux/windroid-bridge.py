@@ -224,6 +224,22 @@ VALID_STATES = [
     "FAILED"
 ]
 
+ALLOWED_STATE_TRANSITIONS = {
+    "INSTALLER": ["INSTALLER", "INSTALLATION_IN_PROGRESS", "FAILED"],
+    "INSTALLATION_IN_PROGRESS": ["INSTALLATION_IN_PROGRESS", "INSTALLATION_COMPLETE", "FAILED"],
+    "INSTALLATION_COMPLETE": ["INSTALLATION_COMPLETE", "OOBE_PENDING", "FAILED"],
+    "OOBE_PENDING": ["OOBE_PENDING", "OOBE_IN_PROGRESS", "FAILED"],
+    "OOBE_IN_PROGRESS": ["OOBE_IN_PROGRESS", "OOBE_COMPLETE", "FAILED"],
+    "OOBE_COMPLETE": ["OOBE_COMPLETE", "DESKTOP_READY", "FAILED"],
+    "DESKTOP_READY": ["DESKTOP_READY", "FAILED"],
+    "FAILED": ["INSTALLER", "FAILED"]
+}
+
+def is_valid_state_transition(from_state: str, to_state: str) -> bool:
+    if not from_state or from_state not in ALLOWED_STATE_TRANSITIONS:
+        return to_state in VALID_STATES
+    return to_state in ALLOWED_STATE_TRANSITIONS.get(from_state, [])
+
 RESERVED_SYSTEM_USERNAMES = {
     "root", "bin", "daemon", "sys", "sync", "games", "man", "lp", "mail", "news",
     "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody",
@@ -388,6 +404,11 @@ def save_native_installer_state(target_root="/", state="OOBE_PENDING", data=None
     tmppath = filepath + ".tmp"
 
     existing = load_native_installer_state(target_root)
+    existing_state = existing.get("state")
+    if existing.get("success") and existing_state and not is_valid_state_transition(existing_state, state):
+        _log_installer(f"ERROR: Illegal state transition attempted from '{existing_state}' to '{state}'")
+        raise ValueError(f"Illegal state transition from '{existing_state}' to '{state}'")
+
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     is_installed = state in ["INSTALLATION_COMPLETE", "OOBE_PENDING", "OOBE_IN_PROGRESS", "OOBE_COMPLETE", "DESKTOP_READY"]
@@ -4249,10 +4270,14 @@ def _run_native_installation_worker(plan: dict):
         # 1. Base system files
         has_fstab = os.path.exists(fstab_path) and os.path.getsize(fstab_path) > 0
         has_passwd = os.path.exists(os.path.join(target_mount, "etc/passwd")) and os.path.getsize(os.path.join(target_mount, "etc/passwd")) > 0
+        has_shadow = os.path.exists(os.path.join(target_mount, "etc/shadow")) and os.path.getsize(os.path.join(target_mount, "etc/shadow")) > 0
+        has_hostname = os.path.exists(os.path.join(target_mount, "etc/hostname")) and os.path.getsize(os.path.join(target_mount, "etc/hostname")) > 0
         has_first_boot = os.path.exists(target_first_boot) and os.path.getsize(target_first_boot) > 0 and os.access(target_first_boot, os.X_OK)
+        has_shell_runner = os.path.exists(target_shell_runner) and os.path.getsize(target_shell_runner) > 0 and os.access(target_shell_runner, os.X_OK)
         has_first_boot_svc = os.path.exists(target_service) and os.path.getsize(target_service) > 0
         has_runtime_mode = os.path.exists(os.path.join(target_mount, "etc/windroid/runtime-mode"))
         has_wants_symlink = os.path.exists(os.path.join(target_mount, "etc/systemd/system/multi-user.target.wants/windroid-first-boot.service"))
+        has_graphical_symlink = os.path.exists(os.path.join(target_mount, "etc/systemd/system/graphical.target.wants/windroid-first-boot.service"))
 
         # 2. Bootloader & Kernel
         has_efi = (os.path.exists(fallback_efi_file) and os.path.getsize(fallback_efi_file) > 0) or \
@@ -4267,12 +4292,20 @@ def _run_native_installation_worker(plan: dict):
             raise RuntimeError("CRITICAL_STEP_FAILED: /etc/fstab is missing or empty on target filesystem.")
         if not has_passwd:
             raise RuntimeError("CRITICAL_STEP_FAILED: /etc/passwd is missing or empty on target filesystem.")
+        if not has_shadow:
+            raise RuntimeError("CRITICAL_STEP_FAILED: /etc/shadow is missing or empty on target filesystem.")
+        if not has_hostname:
+            raise RuntimeError("CRITICAL_STEP_FAILED: /etc/hostname is missing or empty on target filesystem.")
         if not has_first_boot:
             raise RuntimeError("CRITICAL_STEP_FAILED: windroid-first-boot.py is missing or not executable on target.")
+        if not has_shell_runner:
+            raise RuntimeError("CRITICAL_STEP_FAILED: windroid-shell-runner.sh is missing or not executable on target.")
         if not has_first_boot_svc:
             raise RuntimeError("CRITICAL_STEP_FAILED: windroid-first-boot.service unit is missing on target.")
         if not has_wants_symlink:
             raise RuntimeError("CRITICAL_STEP_FAILED: windroid-first-boot.service is not enabled in multi-user.target.wants on target.")
+        if not has_graphical_symlink:
+            raise RuntimeError("CRITICAL_STEP_FAILED: windroid-first-boot.service is not enabled in graphical.target.wants on target.")
         if not has_runtime_mode:
             raise RuntimeError("CRITICAL_STEP_FAILED: /etc/windroid/runtime-mode is missing on target.")
         if not has_efi:

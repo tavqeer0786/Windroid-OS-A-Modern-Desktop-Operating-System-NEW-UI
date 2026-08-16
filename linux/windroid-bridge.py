@@ -447,8 +447,8 @@ def complete_oobe_impl(body: dict):
             "error": "Invalid username format. Username must start with a lowercase letter or underscore and contain only lowercase letters, numbers, hyphens, or underscores."
         }
 
-    if username in RESERVED_SYSTEM_USERNAMES:
-        return {"success": False, "error": f"Username '{username}' is a reserved system account."}
+    if username in RESERVED_SYSTEM_USERNAMES or username in ["windroid-oobe", "root", "user"]:
+        return {"success": False, "error": f"Username '{username}' is a reserved system or temporary account and cannot be used."}
 
     _log_installer(f"OOBE: Creating native user account '{username}'")
     cmd_useradd = ["useradd", "-m", "-c", full_name, "-s", "/bin/bash", username]
@@ -494,24 +494,51 @@ def complete_oobe_impl(body: dict):
         if os.path.exists(tz_path):
             run_command(["ln", "-sf", tz_path, "/etc/localtime"])
 
-    lightdm_conf = "/etc/lightdm/lightdm.conf.d/80-windroid-autologin.conf"
-    os.makedirs("/etc/lightdm/lightdm.conf.d", exist_ok=True)
+    # Verify real user exists before configuring LightDM
+    ok_getent, out_getent, _ = run_command(["getent", "passwd", username])
+    if not ok_getent and not os.path.exists(user_home):
+        return {"success": False, "error": f"Failed to verify creation of user '{username}'."}
+
+    # Configure LightDM for real user autologin
+    lightdm_conf_dir = "/etc/lightdm/lightdm.conf.d"
+    os.makedirs(lightdm_conf_dir, exist_ok=True)
+    
+    # Remove OOBE & Live autologin configs
+    for old_cfg in ["80-windroid-oobe.conf", "80-windroid-live-autologin.conf"]:
+        old_path = os.path.join(lightdm_conf_dir, old_cfg)
+        if os.path.exists(old_path):
+            try:
+                os.remove(old_path)
+            except Exception:
+                pass
+
+    lightdm_conf = os.path.join(lightdm_conf_dir, "80-windroid-autologin.conf")
     conf_lines = [
+        "# Windroid OS Authenticated User Session Configuration\n",
         "[Seat:*]\n",
         "autologin-guest=false\n",
         f"autologin-user={username}\n",
         "autologin-user-timeout=0\n",
         "user-session=openbox\n"
     ]
-    with open(lightdm_conf, "w") as f:
+    with open(lightdm_conf, "w", encoding="utf-8") as f:
         f.writelines(conf_lines)
 
+    # Persist state atomically
     save_native_installer_state("/", "OOBE_COMPLETE", {
         "userConfig": {"username": username, "fullName": full_name, "deviceName": device_name}
     })
     save_native_installer_state("/", "DESKTOP_READY", {
         "userConfig": {"username": username, "fullName": full_name, "deviceName": device_name}
     })
+
+    # Cleanup temporary windroid-oobe account safely
+    try:
+        run_command(["pkill", "-9", "-u", "windroid-oobe"])
+        time.sleep(0.3)
+        run_command(["userdel", "-r", "windroid-oobe"])
+    except Exception as e:
+        _log_installer(f"Notice during temporary user cleanup: {e}")
 
     run_command(["sync"])
     return {"success": True, "username": username, "state": "DESKTOP_READY"}
@@ -3989,6 +4016,60 @@ def _run_native_installation_worker(plan: dict):
         with open(hosts_path, "w", encoding="utf-8") as f:
             f.write(f"127.0.0.1\tlocalhost\n127.0.1.1\t{dev_name}\n\n# The following lines are desirable for IPv6 capable hosts\n::1     localhost ip6-localhost ip6-loopback\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n")
 
+        # Step 5b: Install First-Boot Orchestrator & Systemd Service into Target
+        _update_installer_status("in_progress", "configuring_system", "Installing first-boot orchestrator and systemd units...", 80)
+        
+        # Install first-boot script
+        src_first_boot = "/usr/bin/windroid-first-boot.py"
+        if not os.path.exists(src_first_boot):
+            src_first_boot = os.path.join(os.path.dirname(__file__), "windroid-first-boot.py")
+        
+        target_first_boot = os.path.join(target_mount, "usr/bin/windroid-first-boot.py")
+        os.makedirs(os.path.dirname(target_first_boot), exist_ok=True)
+        if os.path.exists(src_first_boot):
+            shutil.copy2(src_first_boot, target_first_boot)
+            os.chmod(target_first_boot, 0o755)
+
+        # Install first-boot systemd service
+        src_service = "/etc/systemd/system/windroid-first-boot.service"
+        if not os.path.exists(src_service):
+            src_service = os.path.join(os.path.dirname(__file__), "systemd/windroid-first-boot.service")
+
+        target_service = os.path.join(target_mount, "etc/systemd/system/windroid-first-boot.service")
+        os.makedirs(os.path.dirname(target_service), exist_ok=True)
+        if os.path.exists(src_service):
+            shutil.copy2(src_service, target_service)
+            os.chmod(target_service, 0o644)
+
+        # Enable service in target multi-user.target.wants and graphical.target.wants
+        for target_wants in ["etc/systemd/system/multi-user.target.wants", "etc/systemd/system/graphical.target.wants"]:
+            wants_dir = os.path.join(target_mount, target_wants)
+            os.makedirs(wants_dir, exist_ok=True)
+            symlink_target = os.path.join(wants_dir, "windroid-first-boot.service")
+            if os.path.islink(symlink_target) or os.path.exists(symlink_target):
+                try:
+                    os.remove(symlink_target)
+                except Exception:
+                    pass
+            try:
+                os.symlink("/etc/systemd/system/windroid-first-boot.service", symlink_target)
+            except Exception as e:
+                _log_installer(f"Notice creating systemd wants symlink: {e}")
+
+        # Write runtime-mode file into target root
+        target_windroid_dir = os.path.join(target_mount, "etc/windroid")
+        os.makedirs(target_windroid_dir, exist_ok=True)
+        with open(os.path.join(target_windroid_dir, "runtime-mode"), "w", encoding="utf-8") as f:
+            f.write("installed\n")
+
+        # Remove any live ISO autologin config in target
+        target_live_conf = os.path.join(target_mount, "etc/lightdm/lightdm.conf.d/80-windroid-live-autologin.conf")
+        if os.path.exists(target_live_conf):
+            try:
+                os.remove(target_live_conf)
+            except Exception:
+                pass
+
         # Bind virtual filesystems for chroot
         _update_installer_status("in_progress", "installing_bootloader", "Installing and configuring GRUB EFI bootloader in chroot...", 85)
         run_command(["mount", "--bind", "/dev", os.path.join(target_mount, "dev")], timeout=10)
@@ -4001,12 +4082,12 @@ def _run_native_installation_worker(plan: dict):
             run_command(["mount", "-t", "efivarfs", "efivarfs", efivars_target], timeout=10)
 
         # Step 6: Bootloader Installation
-        run_command([
+        ok_grub, _, err_grub = run_command([
             "chroot", target_mount,
             "grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi",
             "--bootloader-id=WindroidOS", "--recheck", "--no-floppy"
         ], timeout=120)
-        run_command(["chroot", target_mount, "update-grub"], timeout=60)
+        ok_ugrub, _, err_ugrub = run_command(["chroot", target_mount, "update-grub"], timeout=60)
 
         # Ensure fallback UEFI bootloader exists (EFI/BOOT/BOOTX64.EFI)
         fallback_efi_dir = os.path.join(target_mount, "boot/efi/EFI/BOOT")
@@ -4020,15 +4101,13 @@ def _run_native_installation_worker(plan: dict):
         _update_installer_status("in_progress", "verifying", "Verifying installed kernel, fstab, and bootloader integrity...", 95)
         
         has_fstab = os.path.exists(fstab_path) and os.path.getsize(fstab_path) > 0
-        has_efi = os.path.exists(fallback_efi_file) or os.path.exists(grub_installed_file)
+        has_efi = (os.path.exists(fallback_efi_file) and os.path.getsize(fallback_efi_file) > 0) or \
+                  (os.path.exists(grub_installed_file) and os.path.getsize(grub_installed_file) > 0)
         
         if not has_fstab:
             raise RuntimeError("Verification failed: /etc/fstab is missing or empty on target filesystem.")
         if not has_efi:
-            _log_installer("Notice: standard EFI binary path not found, writing generic GRUB stub for test/fallback.")
-            os.makedirs(fallback_efi_dir, exist_ok=True)
-            with open(fallback_efi_file, "wb") as f:
-                f.write(b"WINDROID_BOOTX64_STUB")
+            raise RuntimeError(f"Verification failed: Bootloader EFI binary not found or empty (grub-install error: {err_grub or err_ugrub}).")
 
         # Step 8: Commit Point & Atomic State Persistence
         _update_installer_status("in_progress", "committing", "Committing installation state and syncing filesystem buffers...", 98)

@@ -11,14 +11,37 @@ BRIDGE_LOG="/tmp/windroid-bridge.log"
 
 echo "[Windroid OS] Initializing Desktop Shell Watchdog at $(date)" > "$SHELL_LOG"
 
-# Check kernel command line for boot mode
+# Authoritative runtime mode & state detection
 CMDLINE=$(cat /proc/cmdline 2>/dev/null || echo "")
+RUNTIME_MODE="installed"
+if [ -f "/etc/windroid/runtime-mode" ]; then
+    RUNTIME_MODE=$(cat /etc/windroid/runtime-mode | tr -d ' \n\r')
+elif [ -d "/run/live" ] || [ -d "/run/live/medium" ] || [ -d "/cdrom" ] || echo "$CMDLINE" | grep -q "boot=live"; then
+    RUNTIME_MODE="live"
+fi
+
+NATIVE_STATE="NOT_INSTALLED"
+if [ -f "/var/lib/windroid/installer-state.json" ]; then
+    NATIVE_STATE=$(python3 -c "import json; data=json.load(open('/var/lib/windroid/installer-state.json')); print(data.get('state', 'UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
+fi
+
 IS_INSTALLER_BOOT=0
-if echo "$CMDLINE" | grep -q "windroid.mode=installer"; then
+IS_OOBE_BOOT=0
+IS_INSTALLED_DESKTOP=0
+
+if [ "$RUNTIME_MODE" = "installed" ] || [ "$NATIVE_STATE" = "OOBE_PENDING" ] || [ "$NATIVE_STATE" = "OOBE_IN_PROGRESS" ] || [ "$NATIVE_STATE" = "OOBE_COMPLETE" ] || [ "$NATIVE_STATE" = "DESKTOP_READY" ]; then
+    if [ "$NATIVE_STATE" = "OOBE_PENDING" ] || [ "$NATIVE_STATE" = "OOBE_IN_PROGRESS" ]; then
+        IS_OOBE_BOOT=1
+        echo "[Windroid OS] INSTALLED BOOT: Native state is '${NATIVE_STATE}'. Launching Windroid OOBE Session..." >> "$SHELL_LOG"
+    else
+        IS_INSTALLED_DESKTOP=1
+        echo "[Windroid OS] INSTALLED BOOT: Native state is '${NATIVE_STATE}'. Launching Windroid User Desktop..." >> "$SHELL_LOG"
+    fi
+elif [ "$RUNTIME_MODE" = "live" ] && echo "$CMDLINE" | grep -q "windroid.mode=installer"; then
     IS_INSTALLER_BOOT=1
-    echo "[Windroid OS] Kernel cmdline contains 'windroid.mode=installer'. Launching DEDICATED INSTALLER SESSION..." >> "$SHELL_LOG"
+    echo "[Windroid OS] LIVE ISO BOOT: Kernel cmdline contains 'windroid.mode=installer'. Launching DEDICATED LIVE INSTALLER SESSION..." >> "$SHELL_LOG"
 else
-    echo "[Windroid OS] Kernel cmdline mode is LIVE / NORMAL. Launching FULL WINDROID LIVE DESKTOP..." >> "$SHELL_LOG"
+    echo "[Windroid OS] LIVE ISO BOOT: Launching FULL WINDROID LIVE DESKTOP..." >> "$SHELL_LOG"
 fi
 
 HTTP_PID=""
@@ -147,7 +170,16 @@ while true; do
             TARGET_URL="http://127.0.0.1:4173/"
             if [ "$IS_INSTALLER_BOOT" -eq 1 ]; then
                 TARGET_URL="http://127.0.0.1:4173/?mode=installer&context=boot"
-                echo "[Windroid OS] Dedicated Installer URL: ${TARGET_URL}" >> "$SHELL_LOG"
+                echo "[Windroid OS] Dedicated Live Installer URL: ${TARGET_URL}" >> "$SHELL_LOG"
+            elif [ "$IS_OOBE_BOOT" -eq 1 ]; then
+                TARGET_URL="http://127.0.0.1:4173/?mode=oobe&context=installed-boot"
+                echo "[Windroid OS] Dedicated Installed OOBE URL: ${TARGET_URL}" >> "$SHELL_LOG"
+            elif [ "$IS_INSTALLED_DESKTOP" -eq 1 ]; then
+                TARGET_URL="http://127.0.0.1:4173/?mode=installed&context=boot"
+                echo "[Windroid OS] Dedicated Installed Desktop URL: ${TARGET_URL}" >> "$SHELL_LOG"
+            else
+                TARGET_URL="http://127.0.0.1:4173/?mode=live&context=live-desktop"
+                echo "[Windroid OS] Dedicated Live Desktop URL: ${TARGET_URL}" >> "$SHELL_LOG"
             fi
 
             "$CHROMIUM_BIN" \

@@ -1,0 +1,17 @@
+[Unit]
+Description=Windroid OS Installed First-Boot & OOBE Orchestrator
+DefaultDependencies=no
+After=local-fs.target
+Wants=local-fs.target
+Before=lightdm.service display-manager.service graphical.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /usr/bin/windroid-first-boot.py
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutSec=60
+
+[Install]
+WantedBy=multi-user.target graphical.target

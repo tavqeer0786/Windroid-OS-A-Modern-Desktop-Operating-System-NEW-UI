@@ -277,6 +277,15 @@ export class StartupResolver {
           if (nativeStateRes && nativeStateRes.success && nativeStateRes.state) {
             const state = nativeStateRes.state;
             if (state === 'OOBE_PENDING' || state === 'OOBE_IN_PROGRESS') {
+              // Synchronize local session store with authoritative native state
+              InstallerSessionStore.updateSession({
+                lifecycleState: 'INSTALLED_PENDING_OOBE',
+                installationCompleted: true,
+                oobeCompleted: false,
+                targetDisk: nativeStateRes.targetDisk,
+                phase: 'oobe',
+                step: 'region'
+              });
               return {
                 runtimeMode: 'installer',
                 initialPhase: 'oobe',
@@ -291,6 +300,18 @@ export class StartupResolver {
               const uConfig = nativeStateRes.userConfig;
               const realUsername = uConfig?.username;
               if (realUsername && realUsername.trim() !== '' && realUsername !== 'windroid-oobe') {
+                InstallerSessionStore.updateSession({
+                  lifecycleState: 'COMPLETED',
+                  installationCompleted: true,
+                  oobeCompleted: true,
+                  userConfig: {
+                    username: realUsername,
+                    fullName: uConfig?.fullName,
+                    deviceName: uConfig?.deviceName
+                  },
+                  phase: 'oobe',
+                  step: 'desktop'
+                });
                 return {
                   runtimeMode: 'installed',
                   initialPhase: 'oobe',
@@ -302,6 +323,14 @@ export class StartupResolver {
                   source: 'native-cmdline'
                 };
               } else {
+                InstallerSessionStore.updateSession({
+                  lifecycleState: 'INSTALLED_PENDING_OOBE',
+                  installationCompleted: true,
+                  oobeCompleted: false,
+                  targetDisk: nativeStateRes.targetDisk,
+                  phase: 'oobe',
+                  step: 'region'
+                });
                 return {
                   runtimeMode: 'installer',
                   initialPhase: 'oobe',

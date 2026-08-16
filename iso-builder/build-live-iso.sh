@@ -299,6 +299,17 @@ if [ -f "${PROJECT_ROOT}/linux/windroid-bridge.service" ]; then
     cp "${PROJECT_ROOT}/linux/windroid-bridge.service" config/includes.chroot/etc/systemd/system/windroid-bridge.service
 fi
 
+# Copy First-Boot Orchestrator & Systemd Service
+if [ -f "${PROJECT_ROOT}/linux/windroid-first-boot.py" ]; then
+    cp "${PROJECT_ROOT}/linux/windroid-first-boot.py" config/includes.chroot/usr/bin/windroid-first-boot.py
+    chmod +x config/includes.chroot/usr/bin/windroid-first-boot.py
+fi
+
+if [ -f "${PROJECT_ROOT}/linux/systemd/windroid-first-boot.service" ]; then
+    mkdir -p config/includes.chroot/etc/systemd/system
+    cp "${PROJECT_ROOT}/linux/systemd/windroid-first-boot.service" config/includes.chroot/etc/systemd/system/windroid-first-boot.service
+fi
+
 # Copy Shell Watchdog Runner
 cp "${PROJECT_ROOT}/linux/windroid-shell-runner.sh" config/includes.chroot/usr/bin/windroid-shell-runner.sh
 chmod +x config/includes.chroot/usr/bin/windroid-shell-runner.sh

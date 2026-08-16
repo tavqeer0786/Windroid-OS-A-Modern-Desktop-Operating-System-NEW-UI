@@ -299,16 +299,6 @@ if [ -f "${PROJECT_ROOT}/linux/windroid-bridge.service" ]; then
     cp "${PROJECT_ROOT}/linux/windroid-bridge.service" config/includes.chroot/etc/systemd/system/windroid-bridge.service
 fi
 
-if [ -f "${PROJECT_ROOT}/linux/windroid-first-boot.py" ]; then
-    cp "${PROJECT_ROOT}/linux/windroid-first-boot.py" config/includes.chroot/usr/bin/windroid-first-boot.py
-    chmod +x config/includes.chroot/usr/bin/windroid-first-boot.py
-fi
-
-if [ -f "${PROJECT_ROOT}/linux/systemd/windroid-first-boot.service" ]; then
-    mkdir -p config/includes.chroot/etc/systemd/system
-    cp "${PROJECT_ROOT}/linux/systemd/windroid-first-boot.service" config/includes.chroot/etc/systemd/system/windroid-first-boot.service
-fi
-
 # Copy Shell Watchdog Runner
 cp "${PROJECT_ROOT}/linux/windroid-shell-runner.sh" config/includes.chroot/usr/bin/windroid-shell-runner.sh
 chmod +x config/includes.chroot/usr/bin/windroid-shell-runner.sh
@@ -342,7 +332,6 @@ fi
 
 # Permissions setup
 chmod +x /usr/bin/windroid-bridge.py 2>/dev/null || true
-chmod +x /usr/bin/windroid-first-boot.py 2>/dev/null || true
 chmod +x /usr/bin/windroid-shell-runner.sh 2>/dev/null || true
 if [ -f "/usr/bin/windroid-desktop" ]; then
     chmod +x /usr/bin/windroid-desktop 2>/dev/null || true
@@ -353,7 +342,6 @@ update-alternatives --set x-session-manager /usr/bin/openbox-session 2>/dev/null
 
 # Enable services
 systemctl enable windroid-bridge.service 2>/dev/null || true
-systemctl enable windroid-first-boot.service 2>/dev/null || true
 systemctl enable lightdm 2>/dev/null || systemctl enable LightDM 2>/dev/null || true
 systemctl enable NetworkManager 2>/dev/null || true
 systemctl enable bluetooth 2>/dev/null || true

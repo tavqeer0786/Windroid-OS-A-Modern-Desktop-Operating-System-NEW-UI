@@ -39,6 +39,18 @@ PROTECTED_SYSTEM_PATHS = [
     "/proc", "/sys", "/dev", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/etc", "/boot", "/run"
 ]
 
+def _log_installer(message: str):
+    clean_msg = re.sub(r'("password"|"confirmPassword"|"authToken"|"token"): "[^"]+"', r'\1: "[REDACTED]"', str(message))
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    log_line = f"[{timestamp}] [SYSTEM] {clean_msg}\n"
+    print(log_line, end="")
+    try:
+        os.makedirs("/var/log", exist_ok=True)
+        with open("/var/log/windroid-installer.log", "a") as f:
+            f.write(log_line)
+    except Exception:
+        pass
+
 def get_user_home():
     return os.path.expanduser("~")
 
@@ -3438,74 +3450,10 @@ def set_session_logout_impl():
     _write_native_session_status("login_screen")
     return {"success": True, "status": "login_screen"}
 
-# --- INSTALLER BACKEND SUBSYSTEM ---
-INSTALLER_LOCK = threading.Lock()
-INSTALLER_AUTH_TOKENS = {}  # token -> {"targetDisk": str, "planHash": str, "createdAt": float, "used": bool}
-
-INSTALLER_STATE = {
-    "status": "idle",
-    "stage": "idle",
-    "stageDescription": "Ready to install",
-    "progress": 0,
-    "error": None,
-    "canInstall": True
-}
-
-def _log_installer(message: str):
-    clean_msg = re.sub(r'("password"|"confirmPassword"|"authToken"|"token"): "[^"]+"', r'\1: "[REDACTED]"', str(message))
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    log_line = f"[{timestamp}] [INSTALLER] {clean_msg}\n"
-    print(log_line, end="")
-    try:
-        os.makedirs("/var/log", exist_ok=True)
-        with open("/var/log/windroid-installer.log", "a") as f:
-            f.write(log_line)
-    except Exception:
-        pass
-
-def _get_plan_hash(plan: dict) -> str:
-    cleaned = dict(plan)
-    # Exclude volatile fields
-    cleaned.pop("authToken", None)
-    raw = json.dumps(cleaned, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
-
-def _create_installer_auth_token(plan: dict) -> str:
-    token = secrets.token_hex(16)
-    target_disk = str(plan.get("targetDisk", "")).strip()
-    plan_hash = _get_plan_hash(plan)
-    INSTALLER_AUTH_TOKENS[token] = {
-        "targetDisk": target_disk,
-        "planHash": plan_hash,
-        "createdAt": time.time(),
-        "used": False
-    }
-    _log_installer(f"Generated single-use authorization token for target disk '{target_disk}'.")
-    return token
-
-def _verify_installer_auth_token(token: str, plan: dict) -> tuple[bool, str]:
-    if not token or token not in INSTALLER_AUTH_TOKENS:
-        return False, "INVALID_AUTHORIZATION_TOKEN: Missing or invalid execution authorization token."
-
-    token_data = INSTALLER_AUTH_TOKENS[token]
-    if token_data["used"]:
-        return False, "INVALID_AUTHORIZATION_TOKEN: Execution token has already been consumed."
-
-    # Token expires after 15 minutes (900 seconds)
-    if time.time() - token_data["createdAt"] > 900:
-        return False, "INVALID_AUTHORIZATION_TOKEN: Execution token has expired. Please re-authorize."
-
-    current_hash = _get_plan_hash(plan)
-    if token_data["planHash"] != current_hash:
-        stored_disk = token_data.get("targetDisk", "")
-        plan_disk = str(plan.get("targetDisk", "")).strip()
-        if stored_disk and plan_disk and stored_disk == plan_disk:
-            _log_installer(f"Notice: Plan hash differs slightly after authorization, but target disk '{plan_disk}' matches. Permitting execution.")
-        else:
-            return False, "INVALID_AUTHORIZATION_TOKEN: Installation plan target disk changed after authorization token generation."
-
-    token_data["used"] = True
-    return True, ""
+# --- DEPRECATED INSTALLER SUBSYSTEM (PHASE 1 CLEANUP - PENDING PHASE 2 REWRITE) ---
+# NOTE: The legacy installer architecture (partitioning, squashfs extraction,
+# auth tokens, execution plans, GRUB EFI chroot logic) has been completely removed.
+# Phase 2 will implement the new installer architecture from a clean foundation.
 
 def get_installer_boot_mode_impl():
     boot_mode = "uefi" if os.path.exists("/sys/firmware/efi") else "bios"
@@ -3513,7 +3461,6 @@ def get_installer_boot_mode_impl():
 
 def find_live_media_device() -> str:
     try:
-        # Check standard live mountpoints
         for mount_pt in ["/run/live/medium", "/run/live", "/cdrom", "/medium", "/run/initramfs/live", "/live/image"]:
             ok, stdout, _ = run_command(["findmnt", "-n", "-o", "SOURCE", mount_pt])
             if ok and stdout.strip():
@@ -3523,9 +3470,9 @@ def find_live_media_device() -> str:
                     if dev.startswith("/dev/sr") or "loop" in dev:
                         return dev
                     if "nvme" in dev or "mmcblk" in dev:
-                        dev = re.sub(r'p\d+$', '', dev)
+                        dev = re.sub(r"p\d+$", "", dev)
                     else:
-                        dev = re.sub(r'\d+$', '', dev)
+                        dev = re.sub(r"\d+$", "", dev)
                     return dev
     except Exception:
         pass
@@ -3535,989 +3482,75 @@ def get_installer_status_impl():
     mode = get_runtime_mode()
     boot_mode = "uefi" if os.path.exists("/sys/firmware/efi") else "bios"
     live_dev = find_live_media_device()
-    res = dict(INSTALLER_STATE)
-    res.update({
+    return {
         "success": True,
+        "status": "deprecated",
+        "stage": "idle",
+        "stageDescription": "Legacy installer architecture removed. New Phase 2 installer engine pending.",
+        "progress": 0,
+        "error": None,
+        "canInstall": False,
+        "deprecated": True,
         "runtimeMode": mode,
         "bootMode": boot_mode,
-        "liveMediaDevice": live_dev,
-        "canInstall": (mode in ["live", "installer"]) and (boot_mode == "uefi")
-    })
-    return res
+        "liveMediaDevice": live_dev
+    }
 
 def get_installer_disks_impl():
     disks = []
-    raw_block_devices = []
-    eligible_disks = []
-    excluded_devices = []
-    live_dev = find_live_media_device()
-
-    raw_cmd = ""
-    try:
-        if os.path.exists("/proc/cmdline"):
-            with open("/proc/cmdline", "r") as f:
-                raw_cmd = f.read().strip()
-    except Exception:
-        pass
-
     try:
         ok, stdout, _ = run_command(["lsblk", "--json", "--bytes", "-o", "NAME,PATH,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINT,TYPE,RO,RM,MODEL,TRAN,SERIAL,VENDOR,ROTA"])
         if ok and stdout.strip():
             data = json.loads(stdout)
             devices = data.get("blockdevices", [])
             for dev in devices:
-                dev_type = str(dev.get("type") or "").lower()
-                dev_path = str(dev.get("path") or f"/dev/{dev.get('NAME', '')}").strip()
-                dev_name = str(dev.get("NAME") or "").strip()
-                size_bytes = int(dev.get("size") or 0)
-                is_ro = bool(dev.get("ro"))
-
-                raw_entry = {
-                    "path": dev_path,
-                    "name": dev_name,
-                    "type": dev_type,
-                    "sizeBytes": size_bytes,
-                    "transport": str(dev.get("tran") or "sata").lower(),
-                    "removable": bool(dev.get("rm")),
-                    "readOnly": is_ro,
-                    "model": str(dev.get("model") or "Generic Storage").strip(),
-                    "serial": str(dev.get("serial") or "").strip(),
-                    "vendor": str(dev.get("vendor") or "").strip(),
-                    "fstype": str(dev.get("fstype") or ""),
-                    "mountPoint": str(dev.get("mountpoint") or "")
-                }
-                raw_block_devices.append(raw_entry)
-
-                # Filter pseudo/virtual devices
-                if dev_type in ["loop", "ram", "zram"] or dev_name.startswith(("loop", "zram", "ram")):
-                    excluded_devices.append({
-                        "path": dev_path,
-                        "reason": "LOOP_OR_RAM_DEVICE",
-                        "details": f"Virtual kernel device type '{dev_type}'",
-                        "sizeBytes": size_bytes
-                    })
-                    continue
-
-                if dev_type in ["rom"] or dev_name.startswith("sr"):
-                    excluded_devices.append({
-                        "path": dev_path,
-                        "reason": "OPTICAL_ROM_DEVICE",
-                        "details": "Read-only optical CD/DVD drive",
-                        "sizeBytes": size_bytes
-                    })
-                    continue
-
-                if size_bytes < 2 * 1024 * 1024 * 1024:
-                    excluded_devices.append({
-                        "path": dev_path,
-                        "reason": "SIZE_TOO_SMALL_UNDER_2GB",
-                        "details": f"Device size ({size_bytes} bytes) is under 2 GB minimum requirement",
-                        "sizeBytes": size_bytes
-                    })
-                    continue
-
-                is_live = bool(
-                    (live_dev and dev_path == live_dev) or
-                    (live_dev and live_dev in dev_path) or
-                    (dev.get("fstype") in ["iso9660", "squashfs"])
-                )
-
-                children = dev.get("children", [])
-                partitions = []
-                p_idx = 1
-                for child in children:
-                    c_path = child.get("path") or f"/dev/{child.get('NAME', '')}"
-                    c_mount = child.get("mountpoint") or ""
-                    if c_mount and any(p in c_mount for p in ["/run/live", "/medium", "/cdrom"]):
-                        is_live = True
-
-                    partitions.append({
-                        "device": c_path,
-                        "number": p_idx,
-                        "sizeBytes": int(child.get("size") or 0),
-                        "filesystem": child.get("fstype") or "unknown",
-                        "label": child.get("label") or "",
-                        "uuid": child.get("uuid") or "",
-                        "mountPoint": c_mount or "",
-                        "partitionType": child.get("type") or "primary",
-                        "bootable": False
-                    })
-                    p_idx += 1
-
-                if is_ro and not is_live:
-                    excluded_devices.append({
-                        "path": dev_path,
-                        "reason": "READ_ONLY_HARDWARE",
-                        "details": "Hardware device is read-only",
-                        "sizeBytes": size_bytes
-                    })
-                    continue
-
-                disk_entry = {
+                name_val = dev.get("NAME", "")
+                dev_path = str(dev.get("path") or f"/dev/{name_val}").strip()
+                disks.append({
                     "device": dev_path,
-                    "model": (dev.get("model") or "Generic Storage").strip(),
-                    "vendor": (dev.get("vendor") or "").strip(),
-                    "serial": (dev.get("serial") or "").strip(),
-                    "sizeBytes": size_bytes,
-                    "transport": (dev.get("tran") or "sata").lower(),
-                    "removable": bool(dev.get("rm")),
-                    "rotational": bool(dev.get("rota")),
-                    "readOnly": is_ro,
-                    "systemDisk": is_live,
-                    "isLiveMedia": is_live,
-                    "protected": is_live,
-                    "protectionReason": "ACTIVE_INSTALLATION_MEDIA" if is_live else None,
-                    "partitions": partitions
-                }
-
-                disks.append(disk_entry)
-                if not is_live:
-                    eligible_disks.append(disk_entry)
-
+                    "model": str(dev.get("model") or "Storage Device").strip(),
+                    "vendor": str(dev.get("vendor") or "").strip(),
+                    "sizeBytes": int(dev.get("size") or 0),
+                    "readOnly": bool(dev.get("ro")),
+                    "partitions": []
+                })
     except Exception as e:
-        _log_installer(f"lsblk parse error: {e}")
+        _log_installer(f"Notice during disk scan: {e}")
 
     return {
         "success": True,
+        "deprecated": True,
         "disks": disks,
-        "rawBlockDevices": raw_block_devices,
-        "eligibleDisks": eligible_disks,
-        "excludedDevices": excluded_devices,
-        "liveMediaDevice": live_dev,
-        "rawKernelCmdline": raw_cmd,
-        "detectedWindroidMode": get_boot_mode()
+        "message": "Legacy partition planning removed. Phase 2 installer rewrite pending."
     }
-
-def build_default_erase_disk_partitions(target_disk: str) -> list:
-    disk = str(target_disk or "").strip()
-    if not disk:
-        return []
-    dev_basename = os.path.basename(disk)
-    if any(k in disk for k in ["nvme", "mmcblk", "loop"]) or (dev_basename and dev_basename[-1].isdigit()):
-        p1_name = f"{disk}p1"
-        p2_name = f"{disk}p2"
-    else:
-        p1_name = f"{disk}1"
-        p2_name = f"{disk}2"
-
-    return [
-        {
-            "device": p1_name,
-            "sizeBytes": 512 * 1024 * 1024,
-            "filesystem": "fat32",
-            "mountPoint": "/boot/efi",
-            "label": "BOOT",
-            "flags": ["esp", "boot"]
-        },
-        {
-            "device": p2_name,
-            "sizeBytes": 0,
-            "filesystem": "ext4",
-            "mountPoint": "/",
-            "label": "WindroidOS"
-        }
-    ]
-
-def canonicalize_plan(plan: dict) -> dict:
-    if not isinstance(plan, dict):
-        return plan
-    target_disk = str(plan.get("targetDisk", "")).strip()
-    mode = str(plan.get("installationMode", "erase_disk")).strip()
-    partitions = plan.get("partitions")
-
-    if mode == "erase_disk" or not partitions or not isinstance(partitions, list) or len(partitions) == 0:
-        if mode == "erase_disk" and target_disk:
-            plan["partitions"] = build_default_erase_disk_partitions(target_disk)
-            plan["installationMode"] = "erase_disk"
-
-    return plan
 
 def generate_installer_plan_impl(body: dict):
-    target_disk = str(body.get("targetDisk", "")).strip()
-    if not target_disk:
-        return {
-            "success": False,
-            "plan": None,
-            "authToken": "",
-            "errors": ["TARGET_DISK_SELECTION_REQUIRED: Target disk must be explicitly selected by user."],
-            "warnings": []
-        }
-
-    installation_mode = str(body.get("installationMode", "erase_disk")).strip()
-    boot_mode = "uefi" if os.path.exists("/sys/firmware/efi") else "bios"
-
-    user_cfg = body.get("userConfig", {})
-    locale_cfg = body.get("localeConfig", {})
-
-    if installation_mode == "manual":
-        custom_parts = body.get("customPartitions", [])
-        if not custom_parts or not isinstance(custom_parts, list) or len(custom_parts) == 0:
-            return {
-                "success": False,
-                "plan": None,
-                "authToken": "",
-                "errors": ["MANUAL_PARTITIONING_UNSUPPORTED: Manual partitioning requires explicit custom partitions list. Please select 'Erase disk and install Windroid'."],
-                "warnings": []
-            }
-        partitions = custom_parts
-    else:
-        installation_mode = "erase_disk"
-        partitions = build_default_erase_disk_partitions(target_disk)
-
-    plan = {
-        "version": "1.0",
-        "targetDisk": target_disk,
-        "bootMode": boot_mode,
-        "installationMode": installation_mode,
-        "partitions": partitions,
-        "userConfig": {
-            "username": user_cfg.get("username", "windroid").strip() or "windroid",
-            "fullName": user_cfg.get("fullName", "Windroid User").strip() or "Windroid User",
-            "deviceName": user_cfg.get("deviceName", "Windroid-PC").strip() or "Windroid-PC",
-            "requirePassword": bool(user_cfg.get("requirePassword", True))
-        },
-        "localeConfig": {
-            "language": locale_cfg.get("language", "en_US.UTF-8"),
-            "keyboard": locale_cfg.get("keyboard", "us"),
-            "timezone": locale_cfg.get("timezone", "UTC")
-        },
-        "bootloaderConfig": {
-            "targetDevice": target_disk,
-            "type": "grub-efi"
-        }
-    }
-
-    plan = canonicalize_plan(plan)
-    val_res = _validate_plan_internal(plan)
-    auth_token = ""
-    if val_res["valid"]:
-        auth_token = _create_installer_auth_token(plan)
-
     return {
-        "success": val_res["valid"],
-        "plan": plan,
-        "authToken": auth_token,
-        "errors": val_res["errors"],
-        "warnings": val_res["warnings"]
-    }
-
-def authorize_installer_plan_impl(body: dict):
-    plan = body.get("plan") or {}
-    plan = canonicalize_plan(plan)
-    val_res = _validate_plan_internal(plan)
-    if not val_res["valid"]:
-        return {"success": False, "plan": plan, "errors": val_res["errors"], "warnings": val_res["warnings"]}
-
-    token = _create_installer_auth_token(plan)
-    return {"success": True, "authToken": token, "plan": plan}
-
-def _validate_plan_internal(plan: dict) -> dict:
-    errors = []
-    warnings = []
-
-    if not isinstance(plan, dict):
-        return {"valid": False, "errors": ["INVALID_PLAN_FORMAT: Plan must be an object."], "warnings": []}
-
-    target_disk = str(plan.get("targetDisk", "")).strip()
-    mode = get_runtime_mode()
-
-    if mode == "installed":
-        errors.append("Windroid OS is already installed on this device.")
-
-    if not os.path.exists("/sys/firmware/efi") or plan.get("bootMode") == "bios":
-        errors.append("LEGACY_BIOS_UNSUPPORTED: Windroid OS requires UEFI firmware. Legacy BIOS boot is not supported.")
-
-    if not target_disk:
-        errors.append("TARGET_DISK_SELECTION_REQUIRED: Target disk must be explicitly selected by user.")
-    elif not target_disk.startswith("/dev/"):
-        errors.append(f"INVALID_TARGET_DEVICE: Target disk '{target_disk}' is an invalid device path.")
-    else:
-        dev_name = os.path.basename(target_disk)
-        if dev_name.startswith(("loop", "ram", "zram", "sr", "dm-")):
-            errors.append(f"PROHIBITED_TARGET_DEVICE: Target device '{target_disk}' (loop, RAM, optical, or dev-mapper) cannot be used as an installation target.")
-        elif mode in ["live", "installer"]:
-            if not os.path.exists(target_disk):
-                errors.append(f"TARGET_DEVICE_NOT_FOUND: Target block device '{target_disk}' does not exist on host system.")
-            else:
-                try:
-                    st = os.stat(target_disk)
-                    if not stat.S_ISBLK(st.st_mode):
-                        errors.append(f"INVALID_TARGET_DEVICE: Target '{target_disk}' is not a block device.")
-                except Exception:
-                    errors.append(f"TARGET_DEVICE_UNREADABLE: Stat check failed for target '{target_disk}'.")
-
-            disks_info = get_installer_disks_impl()
-            eligible_paths = [d["device"] for d in disks_info.get("eligibleDisks", [])]
-            excluded_info = {d["path"]: d for d in disks_info.get("excludedDevices", [])}
-
-            if target_disk in excluded_info:
-                ex = excluded_info[target_disk]
-                errors.append(f"EXCLUDED_TARGET_DEVICE: Target '{target_disk}' is excluded: {ex.get('reason')} - {ex.get('details')}")
-            elif eligible_paths and target_disk not in eligible_paths:
-                errors.append(f"INELIGIBLE_TARGET_DEVICE: Target disk '{target_disk}' is not a discovered eligible installation target.")
-
-    live_dev = find_live_media_device()
-    if live_dev and target_disk == live_dev:
-        errors.append(f"LIVE_MEDIA_PROTECTED: Target disk '{target_disk}' is the active Live ISO boot media. Select a different target storage device (e.g. Virtual Storage Disk '/dev/sda') to install Windroid OS.")
-
-    u_cfg = plan.get("userConfig", {})
-    uname = u_cfg.get("username", "")
-    if not uname or not re.match(r'^[a-z_][a-z0-9_-]*$', uname):
-        errors.append("Username must consist of lowercase letters, numbers, hyphens, or underscores.")
-    if uname in ["root", "live", "daemon", "bin", "sys"]:
-        errors.append(f"Username '{uname}' is reserved by the system.")
-
-    parts = plan.get("partitions", [])
-    if not parts or not isinstance(parts, list) or len(parts) == 0:
-        errors.append("EMPTY_PARTITION_PLAN: Installation partition plan cannot be empty.")
-    else:
-        esp_parts = [p for p in parts if p.get("mountPoint") == "/boot/efi"]
-        root_parts = [p for p in parts if p.get("mountPoint") == "/"]
-
-        if len(esp_parts) != 1:
-            errors.append("UEFI_ESP_REQUIRED: Windroid OS UEFI installation requires exactly one EFI System Partition mounted at '/boot/efi'.")
-
-        if len(root_parts) != 1:
-            errors.append("Target installation plan requires exactly one root '/' filesystem partition.")
-
-    return {
-        "valid": len(errors) == 0,
-        "errors": errors,
-        "warnings": warnings
+        "success": False,
+        "deprecated": True,
+        "error": "LEGACY_INSTALLER_REMOVED: Old installer architecture has been removed. Phase 2 new installer engine pending."
     }
 
 def validate_installer_plan_impl(body: dict):
-    plan = body.get("plan") or {}
-    plan = canonicalize_plan(plan)
-    res = _validate_plan_internal(plan)
-    return {"success": True, "valid": res["valid"], "errors": res["errors"], "warnings": res["warnings"]}
+    return {
+        "success": False,
+        "deprecated": True,
+        "error": "LEGACY_INSTALLER_REMOVED: Old installer architecture has been removed. Phase 2 new installer engine pending."
+    }
 
-def _revalidate_target_disk(target_dev: str, expected_info: dict = None) -> tuple[bool, str]:
-    if not target_dev or not target_dev.startswith("/dev/"):
-        return False, f"TARGET_DISK_SELECTION_REQUIRED: Target device path '{target_dev}' is invalid or empty."
-
-    if not os.path.exists(target_dev):
-        return False, f"TARGET_DEVICE_CHANGED: Target disk device '{target_dev}' no longer exists on host system."
-
-    # UEFI requirement
-    if not os.path.exists("/sys/firmware/efi"):
-        return False, "LEGACY_BIOS_UNSUPPORTED: Windroid OS target installation requires UEFI firmware (/sys/firmware/efi)."
-
-    try:
-        st = os.stat(target_dev)
-        if not stat.S_ISBLK(st.st_mode):
-            return False, f"INVALID_TARGET: Path '{target_dev}' is not a valid block device."
-    except Exception as e:
-        return False, f"TARGET_DEVICE_CHANGED: Stat failed on '{target_dev}': {e}"
-
-    dev_name = os.path.basename(target_dev)
-    if dev_name.startswith(("loop", "ram", "zram", "sr", "dm-", "md")):
-        return False, f"PROHIBITED_TARGET_DEVICE: Target device '{target_dev}' is a loop, RAM, optical, or virtual device."
-
-    # Must be whole disk, not a partition
-    if re.search(r'p\d+$', dev_name) or (re.search(r'\d+$', dev_name) and not dev_name.startswith("nvme") and not dev_name.startswith("mmcblk")):
-        return False, f"INVALID_TARGET_PARTITION: '{target_dev}' appears to be a partition, not a whole disk device."
-
-    # Check live media protection
-    live_dev = find_live_media_device()
-    if live_dev:
-        real_live = os.path.realpath(live_dev)
-        real_target = os.path.realpath(target_dev)
-        if real_target == real_live or real_target in real_live or real_live in real_target:
-            return False, f"LIVE_MEDIA_PROTECTED: Target disk '{target_dev}' is the active Live boot media and cannot be overwritten."
-
-    # Verify disk size >= 2GB via blockdev or sysfs
-    size_bytes = 0
-    try:
-        ok, stdout, _ = run_command(["blockdev", "--getsize64", target_dev])
-        if ok and stdout.strip().isdigit():
-            size_bytes = int(stdout.strip())
-    except Exception:
-        pass
-
-    if size_bytes > 0 and size_bytes < 2 * 1024 * 1024 * 1024:
-        return False, f"TARGET_DISK_TOO_SMALL: Target disk '{target_dev}' size ({size_bytes} bytes) is below the minimum required size of 2 GB."
-
-    if expected_info:
-        exp_size = expected_info.get("sizeBytes")
-        if exp_size and size_bytes > 0 and abs(size_bytes - exp_size) > 100 * 1024 * 1024:
-            return False, f"TARGET_DISK_MISMATCH: Target disk size changed unexpectedly (expected {exp_size}, found {size_bytes})."
-
-    try:
-        ok, stdout, _ = run_command(["lsblk", "-n", "-o", "MOUNTPOINT", target_dev])
-        if ok and stdout:
-            mounts = [m.strip() for m in stdout.splitlines() if m.strip()]
-            for m in mounts:
-                if any(p in m for p in ["/run/live", "/cdrom", "/medium", "/sys", "/proc", "/dev"]):
-                    return False, f"ACTIVE_SYSTEM_MOUNT: Target disk '{target_dev}' contains active critical mount '{m}'."
-    except Exception:
-        pass
-
-    return True, ""
+def authorize_installer_plan_impl(body: dict):
+    return {
+        "success": False,
+        "deprecated": True,
+        "error": "LEGACY_INSTALLER_REMOVED: Old installer architecture has been removed. Phase 2 new installer engine pending."
+    }
 
 def execute_installer_plan_impl(body: dict):
-    plan = body.get("plan") or {}
-    plan = canonicalize_plan(plan)
-    auth_token = str(body.get("authToken", "")).strip()
-
-    # 1. Verify Authorization Token
-    token_valid, token_err = _verify_installer_auth_token(auth_token, plan)
-    if not token_valid:
-        _log_installer(f"Execution authorization failed: {token_err}")
-        return {"success": False, "error": token_err}
-
-    # 2. Validate Plan Integrity
-    val_res = _validate_plan_internal(plan)
-    if not val_res["valid"]:
-        _log_installer(f"Plan validation error: {val_res['errors']}")
-        return {
-            "success": False,
-            "error": "Plan validation failed: " + "; ".join(val_res["errors"])
-        }
-
-    # 3. Strict Runtime Mode Enforcement
-    mode = get_runtime_mode()
-    if mode not in ["live", "installer"]:
-        # If not live ISO mode, refuse real disk execution
-        _log_installer(f"Execution rejected: Runtime mode is '{mode}' (Live ISO required).")
-        if mode == "browser-development":
-            return _start_simulated_installation_async(plan)
-        return {
-            "success": False,
-            "error": f"NOT_IN_LIVE_MODE: Installation can only be executed in Live ISO mode (Current mode: '{mode}')."
-        }
-
-    # 4. Acquire Installation Lock
-    if not INSTALLER_LOCK.acquire(blocking=False):
-        _log_installer("Execution rejected: Another installation thread is active.")
-        return {"success": False, "error": "INSTALLATION_ALREADY_RUNNING: An installation process is currently active."}
-
-    def run_real_installation():
-        target_dev = plan.get("targetDisk", "")
-        u_cfg = plan.get("userConfig", {})
-        l_cfg = plan.get("localeConfig", {})
-        target_mount = "/mnt/windroid-target"
-
-        def run_required_command(cmd, error_prefix, description="", timeout=300):
-            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-            _log_installer(f"Executing required command ({description}): {cmd_str}")
-            ok, stdout, stderr = run_command(cmd, timeout=timeout)
-            if not ok:
-                err_detail = stderr.strip() or stdout.strip() or "Non-zero exit code"
-                err_msg = f"{error_prefix}: Command '{cmd_str}' failed: {err_detail}"
-                _log_installer(f"CRITICAL COMMAND FAILURE: {err_msg}")
-                raise RuntimeError(err_msg)
-            return stdout
-
-        try:
-            INSTALLER_STATE["status"] = "in_progress"
-            INSTALLER_STATE["error"] = None
-            _log_installer(f"Starting real installation onto target disk: {target_dev}")
-
-            # 0. Firmware Safety Lock
-            if not os.path.exists("/sys/firmware/efi") or plan.get("bootMode") == "bios":
-                raise RuntimeError("LEGACY_BIOS_UNSUPPORTED: Cannot execute installation on Legacy BIOS system. Windroid OS requires UEFI firmware.")
-
-            # 1. Revalidate Target Disk
-            INSTALLER_STATE["stage"] = "revalidating_target"
-            INSTALLER_STATE["stageDescription"] = f"Revalidating target disk identity for {target_dev}..."
-            INSTALLER_STATE["progress"] = 3
-
-            valid_dev, dev_err = _revalidate_target_disk(target_dev)
-            if not valid_dev:
-                raise ValueError(dev_err)
-
-            # 2. Clean Stale Mounts
-            _log_installer(f"Cleaning stale mounts at {target_mount}...")
-            run_command(["umount", "-R", target_mount])
-            run_command(["umount", "-l", f"{target_mount}/boot/efi"])
-            run_command(["umount", "-l", target_mount])
-
-            # 3. Partitioning & Block Device Sanitation
-            INSTALLER_STATE["stage"] = "preparing_disk"
-            INSTALLER_STATE["stageDescription"] = f"Sanitizing block device {target_dev} and creating GPT partition layout..."
-            INSTALLER_STATE["progress"] = 10
-            _log_installer(f"Preparing block device {target_dev} for GPT partitioning...")
-
-            # Check if device is read-only
-            ok_ro, stdout_ro, _ = run_command(["blockdev", "--getro", target_dev])
-            if ok_ro and stdout_ro.strip() == "1":
-                raise RuntimeError(f"TARGET_DISK_READ_ONLY: Target block device '{target_dev}' is write-protected or read-only.")
-
-            # Turn off active swap
-            run_command(["swapoff", "-a"])
-
-            # Unmount any active mountpoints on target device partitions
-            try:
-                ok_m, stdout_m, _ = run_command(["lsblk", "-n", "-o", "MOUNTPOINT,NAME", target_dev])
-                if ok_m and stdout_m:
-                    for line in stdout_m.splitlines():
-                        parts = line.strip().split()
-                        if parts:
-                            mp = parts[0]
-                            if mp and mp != "SWAP" and not mp.startswith("["):
-                                _log_installer(f"Unmounting active target partition mountpoint '{mp}'...")
-                                run_command(["umount", "-f", "-R", mp])
-            except Exception as e:
-                _log_installer(f"Notice during partition unmount pre-check: {e}")
-
-            # Wipe filesystem/partition signatures
-            _log_installer(f"Wiping existing signatures on {target_dev}...")
-            run_command(["wipefs", "--all", "--force", target_dev])
-
-            # Flush block device buffers
-            run_command(["blockdev", "--flushbufs", target_dev])
-            run_command(["sync"])
-
-            # Execute parted mklabel gpt and partition creation
-            run_required_command(["parted", "-s", target_dev, "mklabel", "gpt"], "PARTITION_FAILED", "Create GPT label")
-            run_required_command(["parted", "-s", target_dev, "mkpart", "primary", "fat32", "1MiB", "513MiB"], "PARTITION_FAILED", "Create ESP partition")
-            run_required_command(["parted", "-s", target_dev, "set", "1", "esp", "on"], "PARTITION_FAILED", "Set ESP flag")
-            run_required_command(["parted", "-s", target_dev, "mkpart", "primary", "ext4", "513MiB", "100%"], "PARTITION_FAILED", "Create root partition")
-
-            # Refresh partition table in Linux kernel
-            run_required_command(["partprobe", target_dev], "PARTPROBE_FAILED", "Inform kernel of partition table updates")
-            run_required_command(["udevadm", "settle", "--timeout=10"], "UDEVADM_FAILED", "Wait for udev partition node creation")
-
-            # Verify GPT partition table exists on disk
-            ok_gpt, stdout_gpt, stderr_gpt = run_command(["parted", "-s", target_dev, "print"])
-            if not ok_gpt or "Partition Table: gpt" not in stdout_gpt:
-                raise RuntimeError(f"GPT_VERIFICATION_FAILED: Partition table on target disk '{target_dev}' could not be verified as GPT after partitioning: {stderr_gpt or stdout_gpt}")
-
-            p1 = f"{target_dev}1" if "nvme" not in target_dev and "mmcblk" not in target_dev else f"{target_dev}p1"
-            p2 = f"{target_dev}2" if "nvme" not in target_dev and "mmcblk" not in target_dev else f"{target_dev}p2"
-
-            # Wait up to 5s for partition nodes
-            partition_found = False
-            for _ in range(10):
-                if os.path.exists(p1) and os.path.exists(p2):
-                    partition_found = True
-                    break
-                time.sleep(0.5)
-
-            if not partition_found:
-                raise RuntimeError(f"PARTITION_NODES_MISSING: Partition devices {p1} or {p2} were not created by kernel after partitioning.")
-
-            # 4. Formatting Filesystems
-            INSTALLER_STATE["stage"] = "formatting_filesystems"
-            INSTALLER_STATE["stageDescription"] = f"Formatting FAT32 ESP ({p1}) and ext4 Root ({p2})..."
-            INSTALLER_STATE["progress"] = 25
-            _log_installer(f"Formatting partitions {p1} and {p2}")
-
-            run_required_command(["mkfs.fat", "-F32", p1], "FORMAT_FAILED", f"Format ESP FAT32 {p1}")
-            run_required_command(["mkfs.ext4", "-F", "-L", "WindroidOS", p2], "FORMAT_FAILED", f"Format root ext4 {p2}")
-
-            # 5. Mounting Target
-            INSTALLER_STATE["stage"] = "mounting_target"
-            INSTALLER_STATE["stageDescription"] = f"Mounting root filesystem at {target_mount}..."
-            INSTALLER_STATE["progress"] = 35
-
-            os.makedirs(target_mount, exist_ok=True)
-            run_required_command(["mount", p2, target_mount], "MOUNT_FAILED", f"Mount root partition {p2} on {target_mount}")
-
-            efi_mount = f"{target_mount}/boot/efi"
-            os.makedirs(efi_mount, exist_ok=True)
-            run_required_command(["mount", p1, efi_mount], "MOUNT_FAILED", f"Mount ESP partition {p1} on {efi_mount}")
-
-            # 6. Copying System Image
-            INSTALLER_STATE["stage"] = "copying_system"
-            INSTALLER_STATE["stageDescription"] = "Extracting Windroid system root image to target disk..."
-            INSTALLER_STATE["progress"] = 50
-            _log_installer("Beginning system file extraction...")
-
-            squashfs_candidate_paths = [
-                "/run/live/medium/live/filesystem.squashfs",
-                "/run/live/medium/casper/filesystem.squashfs",
-                "/cdrom/live/filesystem.squashfs",
-                "/medium/live/filesystem.squashfs",
-                "/run/initramfs/live/filesystem.squashfs",
-                "/run/live/rootfs/filesystem.squashfs",
-                "/live/image/live/filesystem.squashfs"
-            ]
-            found_squashfs = None
-            for sp in squashfs_candidate_paths:
-                if os.path.exists(sp):
-                    found_squashfs = sp
-                    break
-
-            if found_squashfs:
-                run_required_command(["unsquashfs", "-f", "-d", target_mount, found_squashfs], "SYSTEM_COPY_FAILED", f"Extract squashfs system image from {found_squashfs}", timeout=1200)
-            else:
-                raise RuntimeError(
-                    f"SYSTEM_SOURCE_MISSING: Could not locate filesystem.squashfs on live boot media. "
-                    f"Checked paths: {', '.join(squashfs_candidate_paths)}. Silent rsync fallback from live root is strictly disabled."
-                )
-
-            # 7. Clean Live-Only Files & Generate /etc/fstab
-            _log_installer("Cleaning Live-session artifacts and writing /etc/fstab...")
-            live_autologin = f"{target_mount}/etc/lightdm/lightdm.conf.d/80-windroid-live-autologin.conf"
-            if os.path.exists(live_autologin):
-                try:
-                    os.remove(live_autologin)
-                except Exception as e:
-                    _log_installer(f"Could not remove live autologin file: {e}")
-
-            # Obtain partition UUIDs using blkid
-            stdout_u1 = run_required_command(["blkid", "-s", "UUID", "-o", "value", p1], "BLKID_FAILED", f"Query UUID for ESP partition {p1}")
-            stdout_u2 = run_required_command(["blkid", "-s", "UUID", "-o", "value", p2], "BLKID_FAILED", f"Query UUID for root partition {p2}")
-
-            p1_uuid = stdout_u1.strip()
-            p2_uuid = stdout_u2.strip()
-
-            if not p1_uuid or not p2_uuid:
-                raise RuntimeError(
-                    f"BLKID_FAILED: Could not retrieve valid UUIDs for target partitions (ESP {p1}: '{p1_uuid}', Root {p2}: '{p2_uuid}'). "
-                    "Device path fallbacks in fstab are forbidden."
-                )
-
-            fstab_content = (
-                "# /etc/fstab: static file system information for Windroid OS\n"
-                f"UUID={p2_uuid}  /          ext4  errors=remount-ro  0  1\n"
-                f"UUID={p1_uuid}  /boot/efi  vfat  umask=0077         0  2\n"
-            )
-
-            os.makedirs(f"{target_mount}/etc", exist_ok=True)
-            with open(f"{target_mount}/etc/fstab", "w") as f:
-                f.write(fstab_content)
-
-            # Read back and verify /etc/fstab contains exact UUIDs
-            with open(f"{target_mount}/etc/fstab", "r") as f:
-                written_fstab = f.read()
-            if f"UUID={p2_uuid}" not in written_fstab or f"UUID={p1_uuid}" not in written_fstab:
-                raise RuntimeError("FSTAB_VERIFICATION_FAILED: Target /etc/fstab does not contain expected partition UUID entries.")
-            _log_installer(f"Successfully generated and verified /etc/fstab with root UUID={p2_uuid} and ESP UUID={p1_uuid}")
-
-            # 8. First Boot OOBE Readiness Configuration
-            INSTALLER_STATE["stage"] = "configuring_system"
-            INSTALLER_STATE["stageDescription"] = "Configuring system boot target for Phase 2 OOBE..."
-            INSTALLER_STATE["progress"] = 70
-
-            # Install first-boot service, bridge scripts & runner onto target
-            target_bin_dir = f"{target_mount}/usr/bin"
-            target_systemd_dir = f"{target_mount}/etc/systemd/system"
-            os.makedirs(target_bin_dir, exist_ok=True)
-            os.makedirs(target_systemd_dir, exist_ok=True)
-
-            if os.path.exists("/usr/bin/windroid-first-boot.py"):
-                shutil.copy2("/usr/bin/windroid-first-boot.py", f"{target_bin_dir}/windroid-first-boot.py")
-            elif os.path.exists("./linux/windroid-first-boot.py"):
-                shutil.copy2("./linux/windroid-first-boot.py", f"{target_bin_dir}/windroid-first-boot.py")
-            os.chmod(f"{target_bin_dir}/windroid-first-boot.py", 0o755)
-
-            if os.path.exists("/etc/systemd/system/windroid-first-boot.service"):
-                shutil.copy2("/etc/systemd/system/windroid-first-boot.service", f"{target_systemd_dir}/windroid-first-boot.service")
-            elif os.path.exists("./linux/systemd/windroid-first-boot.service"):
-                shutil.copy2("./linux/systemd/windroid-first-boot.service", f"{target_systemd_dir}/windroid-first-boot.service")
-
-            if os.path.exists("/usr/bin/windroid-bridge.py"):
-                shutil.copy2("/usr/bin/windroid-bridge.py", f"{target_bin_dir}/windroid-bridge.py")
-            elif os.path.exists("./linux/windroid-bridge.py"):
-                shutil.copy2("./linux/windroid-bridge.py", f"{target_bin_dir}/windroid-bridge.py")
-            os.chmod(f"{target_bin_dir}/windroid-bridge.py", 0o755)
-
-            if os.path.exists("/etc/systemd/system/windroid-bridge.service"):
-                shutil.copy2("/etc/systemd/system/windroid-bridge.service", f"{target_systemd_dir}/windroid-bridge.service")
-            elif os.path.exists("./linux/windroid-bridge.service"):
-                shutil.copy2("./linux/windroid-bridge.service", f"{target_systemd_dir}/windroid-bridge.service")
-
-            if os.path.exists("/usr/bin/windroid-shell-runner.sh"):
-                shutil.copy2("/usr/bin/windroid-shell-runner.sh", f"{target_bin_dir}/windroid-shell-runner.sh")
-            elif os.path.exists("./linux/windroid-shell-runner.sh"):
-                shutil.copy2("./linux/windroid-shell-runner.sh", f"{target_bin_dir}/windroid-shell-runner.sh")
-            os.chmod(f"{target_bin_dir}/windroid-shell-runner.sh", 0o755)
-
-            # Create temporary windroid-oobe system account on target
-            run_command(["chroot", target_mount, "useradd", "-r", "-m", "-c", "Windroid OOBE Setup", "-s", "/bin/bash", "windroid-oobe"])
-
-            target_oobe_openbox = f"{target_mount}/home/windroid-oobe/.config/openbox"
-            os.makedirs(target_oobe_openbox, exist_ok=True)
-            with open(f"{target_oobe_openbox}/autostart", "w") as f:
-                f.write("#!/bin/sh\n/usr/bin/windroid-shell-runner.sh &\n")
-            os.chmod(f"{target_oobe_openbox}/autostart", 0o755)
-            run_command(["chroot", target_mount, "chown", "-R", "windroid-oobe:windroid-oobe", "/home/windroid-oobe"])
-
-            target_lightdm_dir = f"{target_mount}/etc/lightdm/lightdm.conf.d"
-            os.makedirs(target_lightdm_dir, exist_ok=True)
-            target_lightdm_conf = f"{target_lightdm_dir}/80-windroid-autologin.conf"
-            conf_lines = [
-                "[Seat:*]\n",
-                "autologin-guest=false\n",
-                "autologin-user=windroid-oobe\n",
-                "autologin-user-timeout=0\n",
-                "user-session=openbox\n"
-            ]
-            with open(target_lightdm_conf, "w") as f:
-                f.writelines(conf_lines)
-            _log_installer("Configured target /etc/lightdm/lightdm.conf.d/80-windroid-autologin.conf for windroid-oobe autologin.")
-
-            # 9. Hostname, Timezone, Locale
-            INSTALLER_STATE["stage"] = "configuring_system"
-            INSTALLER_STATE["stageDescription"] = "Configuring system hostname, timezone, and locale..."
-            INSTALLER_STATE["progress"] = 80
-
-            dev_name = u_cfg.get("deviceName", "Windroid-PC")
-            with open(f"{target_mount}/etc/hostname", "w") as f:
-                f.write(dev_name + "\n")
-
-            hosts_content = f"127.0.0.1\tlocalhost\n127.0.1.1\t{dev_name}\n"
-            with open(f"{target_mount}/etc/hosts", "w") as f:
-                f.write(hosts_content)
-
-            tz = l_cfg.get("timezone", "UTC")
-            tz_path = f"{target_mount}/usr/share/zoneinfo/{tz}"
-            if os.path.exists(tz_path):
-                run_required_command(["chroot", target_mount, "ln", "-sf", f"/usr/share/zoneinfo/{tz}", "/etc/localtime"], "SYSTEM_CONFIG_FAILED", "Set timezone symlink")
-
-            # Write installed runtime mode marker on target
-            os.makedirs(f"{target_mount}/etc/windroid", exist_ok=True)
-            with open(f"{target_mount}/etc/windroid/runtime-mode", "w") as f:
-                f.write("installed\n")
-
-            # Configure /etc/default/grub on target system so kernel boots with windroid.mode=installed
-            grub_default_path = f"{target_mount}/etc/default/grub"
-            grub_config_lines = [
-                'GRUB_DEFAULT=0\n',
-                'GRUB_TIMEOUT=5\n',
-                'GRUB_DISTRIBUTOR="Windroid OS"\n',
-                'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash windroid.mode=installed"\n',
-                'GRUB_CMDLINE_LINUX=""\n'
-            ]
-            with open(grub_default_path, "w") as f:
-                f.writelines(grub_config_lines)
-            _log_installer("Configured /etc/default/grub with windroid.mode=installed")
-
-            # 10. Bind Mounts & GRUB EFI Installation
-            INSTALLER_STATE["stage"] = "installing_bootloader"
-            INSTALLER_STATE["stageDescription"] = "Installing GRUB EFI bootloader and updating initramfs..."
-            INSTALLER_STATE["progress"] = 90
-            _log_installer("Setting up virtual bind mounts for GRUB bootloader installation...")
-
-            bind_dirs = ["/dev", "/dev/pts", "/proc", "/sys", "/run"]
-            mounted_bind_dirs = []
-            try:
-                for vdir in bind_dirs:
-                    target_vdir = f"{target_mount}{vdir}"
-                    run_required_command(["mount", "--bind", vdir, target_vdir], "MOUNT_FAILED", f"Bind mount {vdir}")
-                    mounted_bind_dirs.append(target_vdir)
-
-                # Update initramfs inside target - CRITICAL REQUIREMENT: MUST fail-fast if fails
-                _log_installer("Updating target initramfs...")
-                run_required_command(["chroot", target_mount, "update-initramfs", "-u", "-k", "all"], "INITRAMFS_FAILED", "Update initramfs in chroot", timeout=300)
-
-                # 1. Standard GRUB EFI Installation - MUST fail-fast if fails
-                _log_installer("Executing standard grub-install --target=x86_64-efi...")
-                run_required_command([
-                    "chroot", target_mount,
-                    "grub-install",
-                    "--target=x86_64-efi",
-                    "--efi-directory=/boot/efi",
-                    "--bootloader-id=Windroid",
-                    "--recheck",
-                    "--no-nvram"
-                ], "BOOTLOADER_FAILED", "Standard GRUB EFI installation", timeout=300)
-
-                # 2. Removable GRUB EFI Installation for USB / VirtualBox compatibility
-                _log_installer("Executing removable grub-install --target=x86_64-efi --removable...")
-                run_required_command([
-                    "chroot", target_mount,
-                    "grub-install",
-                    "--target=x86_64-efi",
-                    "--efi-directory=/boot/efi",
-                    "--bootloader-id=Windroid",
-                    "--recheck",
-                    "--removable"
-                ], "BOOTLOADER_FAILED", "GRUB EFI removable installation", timeout=300)
-
-                # Enable systemd services inside target chroot
-                run_command(["chroot", target_mount, "systemctl", "enable", "windroid-first-boot.service"])
-                run_command(["chroot", target_mount, "systemctl", "enable", "windroid-bridge.service"])
-                target_wants_dir = f"{target_mount}/etc/systemd/system/graphical.target.wants"
-                os.makedirs(target_wants_dir, exist_ok=True)
-                try:
-                    os.symlink("/etc/systemd/system/windroid-first-boot.service", f"{target_wants_dir}/windroid-first-boot.service")
-                except FileExistsError:
-                    pass
-                try:
-                    os.symlink("/etc/systemd/system/windroid-bridge.service", f"{target_wants_dir}/windroid-bridge.service")
-                except FileExistsError:
-                    pass
-
-                # Update GRUB configuration - CRITICAL REQUIREMENT: MUST fail-fast if fails
-                _log_installer("Executing update-grub in chroot...")
-                run_required_command(["chroot", target_mount, "update-grub"], "BOOTLOADER_FAILED", "Update GRUB configuration", timeout=300)
-
-                # 3. Create explicit EFI grub.cfg forwarders for VirtualBox and generic UEFI boot managers
-                esp_boot_dir = f"{target_mount}/boot/efi/EFI/BOOT"
-                esp_windroid_dir = f"{target_mount}/boot/efi/EFI/Windroid"
-                os.makedirs(esp_boot_dir, exist_ok=True)
-                os.makedirs(esp_windroid_dir, exist_ok=True)
-
-                esp_grub_cfg = (
-                    f"search --no-floppy --fs-uuid --set=root {p2_uuid}\n"
-                    f"set prefix=($root)/boot/grub\n"
-                    f"configfile /boot/grub/grub.cfg\n"
-                )
-
-                with open(f"{esp_boot_dir}/grub.cfg", "w") as f:
-                    f.write(esp_grub_cfg)
-                with open(f"{esp_windroid_dir}/grub.cfg", "w") as f:
-                    f.write(esp_grub_cfg)
-                _log_installer(f"Wrote ESP grub.cfg forwarder files for EFI/BOOT and EFI/Windroid using root UUID {p2_uuid}")
-
-                # Ensure both EFI loader binaries exist (grubx64.efi and BOOTX64.EFI)
-                grub_efi_src = f"{esp_windroid_dir}/grubx64.efi"
-                fallback_efi = f"{esp_boot_dir}/BOOTX64.EFI"
-                if os.path.exists(grub_efi_src) and not os.path.exists(fallback_efi):
-                    shutil.copy2(grub_efi_src, fallback_efi)
-                    _log_installer("Copied Windroid grubx64.efi to EFI/BOOT/BOOTX64.EFI")
-                elif os.path.exists(fallback_efi) and not os.path.exists(grub_efi_src):
-                    shutil.copy2(fallback_efi, grub_efi_src)
-                    _log_installer("Copied BOOTX64.EFI to EFI/Windroid/grubx64.efi")
-
-            finally:
-                for t_vdir in reversed(mounted_bind_dirs):
-                    ok_um, _, err_um = run_command(["umount", "-l", t_vdir])
-                    if not ok_um:
-                        _log_installer(f"Notice during bind unmount of {t_vdir}: {err_um}")
-
-            # 11. Save Native State OOBE_PENDING & Verification
-            save_native_installer_state(target_mount, "OOBE_PENDING", {
-                "targetDisk": target_dev,
-                "localeConfig": l_cfg
-            })
-            _log_installer("Persisted native installer state 'OOBE_PENDING' on target root filesystem.")
-
-            # Read back state file to verify persistence
-            state_filepath = f"{target_mount}/var/lib/windroid/installer-state.json"
-            if not os.path.exists(state_filepath):
-                raise RuntimeError("VERIFICATION_FAILED: /var/lib/windroid/installer-state.json was not created on target root.")
-            try:
-                with open(state_filepath, "r") as f:
-                    read_state = json.load(f)
-
-                is_valid, val_err = validate_native_installer_state_data(read_state)
-                if not is_valid or read_state.get("state") != "OOBE_PENDING":
-                    raise RuntimeError(f"VERIFICATION_FAILED: Invalid persisted state data on target: {val_err or read_state}")
-            except Exception as se:
-                raise RuntimeError(f"VERIFICATION_FAILED: Could not read back target installer-state.json: {se}")
-
-            INSTALLER_STATE["stage"] = "finalizing"
-            INSTALLER_STATE["stageDescription"] = "Verifying target installation integrity and safely unmounting..."
-            INSTALLER_STATE["progress"] = 95
-
-            _log_installer("Verifying installed filesystem structure, kernel, initramfs, and EFI boot files...")
-
-            required_target_files = [
-                f"{target_mount}/var/lib/windroid/installer-state.json",
-                f"{target_mount}/usr/bin/windroid-first-boot.py",
-                f"{target_mount}/etc/systemd/system/windroid-first-boot.service",
-                f"{target_mount}/usr/bin/windroid-bridge.py",
-                f"{target_mount}/etc/systemd/system/windroid-bridge.service",
-                f"{target_mount}/usr/bin/windroid-shell-runner.sh",
-                f"{target_mount}/etc/lightdm/lightdm.conf.d/80-windroid-autologin.conf",
-                f"{target_mount}/home/windroid-oobe/.config/openbox/autostart",
-                f"{target_mount}/etc/windroid/runtime-mode",
-                f"{target_mount}/etc/fstab",
-                f"{target_mount}/etc/hostname",
-                f"{target_mount}/etc/passwd",
-                f"{target_mount}/etc/shadow",
-                f"{target_mount}/boot/grub/grub.cfg",
-                f"{target_mount}/boot/efi/EFI/BOOT/BOOTX64.EFI",
-                f"{target_mount}/boot/efi/EFI/BOOT/grub.cfg",
-                f"{target_mount}/boot/efi/EFI/Windroid/grubx64.efi",
-                f"{target_mount}/boot/efi/EFI/Windroid/grub.cfg"
-            ]
-            for rfile in required_target_files:
-                if not os.path.exists(rfile):
-                    raise RuntimeError(f"VERIFICATION_FAILED: Required installed file '{rfile}' does not exist after installation.")
-                if os.path.getsize(rfile) == 0:
-                    raise RuntimeError(f"VERIFICATION_FAILED: Required installed file '{rfile}' is empty (0 bytes) after installation.")
-
-            boot_dir = f"{target_mount}/boot"
-            if not os.path.exists(boot_dir):
-                raise RuntimeError("VERIFICATION_FAILED: Target /boot directory does not exist.")
-
-            boot_files = os.listdir(boot_dir)
-            valid_kernels = [f for f in boot_files if f.startswith("vmlinuz") and os.path.getsize(f"{boot_dir}/{f}") > 0]
-            valid_initrds = [f for f in boot_files if (f.startswith("initrd") or f.startswith("initramfs")) and os.path.getsize(f"{boot_dir}/{f}") > 0]
-
-            if not valid_kernels:
-                raise RuntimeError(f"VERIFICATION_FAILED: Target /boot does not contain any valid non-empty kernel file (vmlinuz*). Found: {boot_files}")
-
-            if not valid_initrds:
-                raise RuntimeError(f"VERIFICATION_FAILED: Target /boot does not contain any valid non-empty initramfs file (initrd.img* / initramfs*). Found: {boot_files}")
-
-            # Flush cached filesystem writes to disk
-            run_command(["sync"])
-
-            run_required_command(["umount", "-l", f"{target_mount}/boot/efi"], "UNMOUNT_FAILED", "Unmount ESP partition")
-            run_required_command(["umount", "-l", target_mount], "UNMOUNT_FAILED", "Unmount root partition")
-
-            INSTALLER_STATE["stage"] = "completed"
-            INSTALLER_STATE["stageDescription"] = "Windroid OS has been successfully installed onto target disk!"
-            INSTALLER_STATE["progress"] = 100
-            INSTALLER_STATE["status"] = "completed"
-            _log_installer("Installation completed and verified successfully!")
-
-        except Exception as err:
-            err_msg = str(err)
-            _log_installer(f"Installation failed with error: {err_msg}")
-            INSTALLER_STATE["status"] = "failed"
-            INSTALLER_STATE["stage"] = "failed"
-            INSTALLER_STATE["error"] = err_msg
-            INSTALLER_STATE["progress"] = 0
-        finally:
-            _log_installer("Ensuring all target mounts are unmounted cleanly...")
-            try:
-                for vdir in ["/dev/pts", "/dev", "/proc", "/sys", "/run"]:
-                    run_command(["umount", "-l", f"{target_mount}{vdir}"])
-                run_command(["umount", "-l", f"{target_mount}/boot/efi"])
-                run_command(["umount", "-l", target_mount])
-            except Exception:
-                pass
-            INSTALLER_LOCK.release()
-
-    thread = threading.Thread(target=run_real_installation, daemon=True)
-    thread.start()
-    return {"success": True, "status": "started"}
-
-def _start_simulated_installation_async(plan: dict):
-    if not INSTALLER_LOCK.acquire(blocking=False):
-        return {"success": False, "error": "An installation process is already running."}
-
-    def run_simulation():
-        try:
-            stages = [
-                ("preparing_disk", "Initializing storage layout...", 10),
-                ("creating_partitions", "Creating system and boot partitions...", 25),
-                ("formatting_filesystems", "Formatting ext4 and FAT32 filesystems...", 40),
-                ("mounting_target", "Preparing target mountpoints...", 55),
-                ("copying_system", "Unpacking Windroid system image...", 70),
-                ("configuring_user", "Creating user profile...", 82),
-                ("configuring_system", "Setting host configuration and locale...", 90),
-                ("installing_bootloader", "Writing GRUB EFI bootloader...", 96),
-                ("finalizing", "Finalizing installation...", 99),
-                ("completed", "Installation completed successfully!", 100)
-            ]
-            INSTALLER_STATE["status"] = "in_progress"
-            INSTALLER_STATE["error"] = None
-
-            for stage_id, desc, prog in stages:
-                INSTALLER_STATE["stage"] = stage_id
-                INSTALLER_STATE["stageDescription"] = desc
-                INSTALLER_STATE["progress"] = prog
-                if stage_id == "completed":
-                    INSTALLER_STATE["status"] = "completed"
-                time.sleep(0.8)
-        except Exception as e:
-            INSTALLER_STATE["status"] = "failed"
-            INSTALLER_STATE["error"] = str(e)
-        finally:
-            INSTALLER_LOCK.release()
-
-    thread = threading.Thread(target=run_simulation, daemon=True)
-    thread.start()
-    return {"success": True, "status": "started_simulated"}
+    return {
+        "success": False,
+        "deprecated": True,
+        "error": "LEGACY_INSTALLER_REMOVED: Old installer architecture has been removed. Phase 2 new installer engine pending."
+    }
 
 def run():
     server_address = (HOST, PORT)

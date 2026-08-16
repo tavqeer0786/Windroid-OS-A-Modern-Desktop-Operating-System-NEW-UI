@@ -1,4 +1,5 @@
 import React from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import { useOS } from '../../context/OSContext';
 import { 
   Wifi, 
@@ -206,8 +207,6 @@ export const QuickSettingsPanel: React.FC = () => {
     closeAllPanels
   } = useOS();
 
-  if (!isQuickSettingsOpen) return null;
-
   const wifiDisabled = radioCapabilities.loading || !radioCapabilities.wifiAdapterPresent || radioCapabilities.wifiHardwareBlocked;
   const bluetoothDisabled = radioCapabilities.loading || !radioCapabilities.bluetoothAdapterPresent || radioCapabilities.bluetoothHardwareBlocked || !radioCapabilities.bluezAvailable;
   const hotspotDisabled = radioCapabilities.loading || !radioCapabilities.hotspotAvailable;
@@ -228,11 +227,38 @@ export const QuickSettingsPanel: React.FC = () => {
   };
 
   return (
-    <div 
-      onClick={(e) => e.stopPropagation()}
-      className="fixed top-12 right-3 z-[9980] w-[370px] min-h-[470px] p-5 rounded-2xl bg-[#f3f3f3]/95 dark:bg-[#1c1c1c]/95 backdrop-blur-3xl backdrop-saturate-150 border border-slate-200/80 dark:border-white/10 shadow-2xl text-slate-800 dark:text-slate-100 flex flex-col justify-between gap-6 animate-in fade-in slide-in-from-top-2 duration-150 select-none overflow-hidden"
-    >
-      {/* 3-Column Quick Settings Grid */}
+    <AnimatePresence>
+      {isQuickSettingsOpen && (
+        <>
+          {/* Invisible Overlay for Outside Clicks */}
+          <motion.div 
+            key="quick-settings-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.14 }}
+            onClick={closeAllPanels}
+            className="fixed inset-0 z-[9970] bg-transparent cursor-default"
+          />
+
+          <motion.div 
+            key="quick-settings-panel"
+            initial={{ opacity: 0, y: -28, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ 
+              opacity: 0, 
+              y: -28, 
+              scale: 0.97,
+              transition: { duration: 0.16, ease: [0.4, 0, 1, 1] } 
+            }}
+            transition={{ 
+              duration: 0.21,
+              ease: [0, 0, 0.2, 1]
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="fixed top-12 right-3 z-[9980] w-[370px] min-h-[470px] p-5 rounded-2xl bg-[#f3f3f3]/95 dark:bg-[#1c1c1c]/95 backdrop-blur-3xl backdrop-saturate-150 border border-slate-200/80 dark:border-white/10 shadow-2xl text-slate-800 dark:text-slate-100 flex flex-col justify-between gap-6 select-none overflow-hidden"
+          >
+            {/* 3-Column Quick Settings Grid */}
       <div className="grid grid-cols-3 gap-x-3.5 gap-y-4 pt-1">
         <Win11Tile
           label="Wi-Fi"
@@ -402,7 +428,10 @@ export const QuickSettingsPanel: React.FC = () => {
           </button>
         </div>
       </div>
-    </div>
+    </motion.div>
+    </>
+      )}
+    </AnimatePresence>
   );
 };
 

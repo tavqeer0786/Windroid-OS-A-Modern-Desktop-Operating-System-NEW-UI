@@ -1,5 +1,12 @@
+/**
+ * @deprecated Legacy OS Installer types (Phase 1 Cleanup).
+ * These types belong to the removed legacy installer architecture.
+ * Phase 2 will implement the new installer architecture and its updated type definitions.
+ */
 export type BootMode = 'uefi' | 'bios';
+/** @deprecated Legacy OS Installer type */
 export type InstallationMode = 'erase_disk' | 'manual';
+/** @deprecated Legacy OS Installer type */
 export type InstallerStage =
   | 'idle'
   | 'preparing_disk'
@@ -14,6 +21,7 @@ export type InstallerStage =
   | 'completed'
   | 'failed';
 
+/** @deprecated Legacy OS Installer type */
 export interface InstallerPartition {
   device: string;
   number: number;
@@ -27,6 +35,7 @@ export interface InstallerPartition {
   flags?: string[];
 }
 
+/** @deprecated Legacy OS Installer type */
 export interface InstallerDisk {
   device: string;
   model: string;
@@ -45,6 +54,7 @@ export interface InstallerDisk {
   partitions: InstallerPartition[];
 }
 
+/** @deprecated Legacy OS Installer type */
 export interface RawBlockDevice {
   path: string;
   name: string;
@@ -60,6 +70,7 @@ export interface RawBlockDevice {
   mountPoint?: string;
 }
 
+/** @deprecated Legacy OS Installer type */
 export interface ExcludedDevice {
   path: string;
   reason: string;
@@ -67,6 +78,7 @@ export interface ExcludedDevice {
   sizeBytes?: number;
 }
 
+/** @deprecated Legacy OS Installer type */
 export interface GetInstallerDisksResponse {
   success: boolean;
   error?: string;
@@ -78,6 +90,7 @@ export interface GetInstallerDisksResponse {
   rawKernelCmdline?: string;
   detectedWindroidMode?: string;
   diagnostics?: Record<string, any>;
+  deprecated?: boolean;
 }
 
 export interface UserConfig {
@@ -94,6 +107,7 @@ export interface LocaleConfig {
   timezone: string;
 }
 
+/** @deprecated Legacy OS Installer type */
 export interface PlannedPartition {
   device: string;
   sizeBytes: number;
@@ -103,6 +117,7 @@ export interface PlannedPartition {
   flags?: string[];
 }
 
+/** @deprecated Legacy OS Installer type */
 export interface InstallationPlan {
   version: string;
   targetDisk: string;
@@ -117,8 +132,9 @@ export interface InstallationPlan {
   };
 }
 
+/** @deprecated Legacy OS Installer type */
 export interface InstallerStatus {
-  status: 'idle' | 'in_progress' | 'completed' | 'failed';
+  status: 'idle' | 'in_progress' | 'completed' | 'failed' | 'deprecated';
   stage: InstallerStage;
   stageDescription: string;
   progress: number;
@@ -127,6 +143,7 @@ export interface InstallerStatus {
   runtimeMode: 'live' | 'installed' | 'browser-development' | 'installer';
   bootMode: BootMode;
   liveMediaDevice?: string;
+  deprecated?: boolean;
 }
 
 export type InstallerPhase = 'installation' | 'oobe';

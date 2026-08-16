@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../../context/OSContext';
 import { AppId } from '../../types/os';
+import { AnimatePresence, motion } from 'motion/react';
 import { 
   Search, Sparkles, X, ChevronRight, ChevronLeft, 
   Power, Moon, RotateCw, FileText, Folder, Palette, Terminal as TerminalLucide,
@@ -54,8 +55,6 @@ export const AppLauncherGrid: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isAppLauncherOpen, closeAllPanels]);
-
-  if (!isAppLauncherOpen) return null;
 
   // Pinned Apps from OS Context
   const pinnedApps = pinnedAppIds
@@ -196,21 +195,44 @@ export const AppLauncherGrid: React.FC = () => {
   };
 
   return (
-    <>
-      {/* Invisible Overlay for Outside Clicks (No desktop blur or dimming) */}
-      <div 
-        onClick={closeAllPanels}
-        className="fixed inset-0 z-[9990] bg-transparent cursor-default"
-      />
+    <AnimatePresence>
+      {isAppLauncherOpen && (
+        <>
+          {/* Invisible Overlay for Outside Clicks (No desktop blur or dimming) */}
+          <motion.div 
+            key="app-launcher-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            onClick={closeAllPanels}
+            className="fixed inset-0 z-[9990] bg-transparent cursor-default"
+          />
 
-      {/* Start Menu Panel (Floating directly above Dock) */}
-      <div 
-        onClick={(e) => {
-          e.stopPropagation();
-          if (isPowerMenuOpen) setIsPowerMenuOpen(false);
-        }}
-        className="fixed bottom-[104px] left-1/2 -translate-x-1/2 z-[9995] w-[640px] max-w-[92vw] h-[580px] max-h-[calc(100vh-140px)] rounded-[5px] bg-white/90 dark:bg-slate-900/85 backdrop-blur-3xl backdrop-saturate-150 border border-white dark:border-white/20 shadow-2xl shadow-black/20 flex flex-col overflow-hidden text-slate-800 dark:text-slate-100 select-none animate-in fade-in zoom-in-95 duration-150"
-      >
+          {/* Start Menu Panel (Floating directly above Dock with slide-top on open, slide-bottom on close) */}
+          <motion.div 
+            key="app-launcher-panel"
+            initial={{ opacity: 0, y: 50, x: '-50%', scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, x: '-50%', scale: 1 }}
+            exit={{ 
+              opacity: 0, 
+              y: 50, 
+              x: '-50%', 
+              scale: 0.97,
+              transition: { duration: 0.18, ease: [0.32, 0, 0.67, 0] }
+            }}
+            transition={{ 
+              type: 'spring',
+              stiffness: 360,
+              damping: 28,
+              mass: 0.7
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isPowerMenuOpen) setIsPowerMenuOpen(false);
+            }}
+            className="fixed bottom-[104px] left-1/2 z-[9995] w-[640px] max-w-[92vw] h-[580px] max-h-[calc(100vh-140px)] rounded-[5px] bg-white/90 dark:bg-slate-900/85 backdrop-blur-3xl backdrop-saturate-150 border border-white dark:border-white/20 shadow-2xl shadow-black/20 flex flex-col overflow-hidden text-slate-800 dark:text-slate-100 select-none"
+          >
         {/* Top Search Field */}
         <div className="p-4 pb-3 border-b border-white/30 dark:border-white/10 shrink-0">
           <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-[12px] bg-white/40 dark:bg-slate-800/40 backdrop-blur-md border border-white/50 dark:border-slate-700/60 transition-all shadow-inner">
@@ -327,7 +349,14 @@ export const AppLauncherGrid: React.FC = () => {
             )
           ) : currentView === 'allApps' ? (
             /* ALL APPS VIEW - DUAL COLUMN WITH INDEPENDENT SCROLLBARS */
-            <div className="flex flex-col h-full min-h-0 space-y-3">
+            <motion.div 
+              key="all-apps-view"
+              initial={{ opacity: 0, x: 16 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -16 }}
+              transition={{ duration: 0.16, ease: "easeOut" }}
+              className="flex flex-col h-full min-h-0 space-y-3"
+            >
               <div className="flex items-center justify-between pb-1 shrink-0">
                 <button
                   onClick={() => setCurrentView('start')}
@@ -407,10 +436,17 @@ export const AppLauncherGrid: React.FC = () => {
                   </div>
                 </div>
               </div>
-            </div>
+            </motion.div>
           ) : (
             /* PINNED & RECOMMENDED START VIEW */
-            <div className="flex flex-col gap-5">
+            <motion.div 
+              key="start-pinned-view"
+              initial={{ opacity: 0, x: -16 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 16 }}
+              transition={{ duration: 0.16, ease: "easeOut" }}
+              className="flex flex-col gap-5"
+            >
               {/* Pinned Section Header */}
               <div>
                 <div className="flex items-center justify-between mb-2 px-1">
@@ -491,7 +527,7 @@ export const AppLauncherGrid: React.FC = () => {
                   </div>
                 )}
               </div>
-            </div>
+            </motion.div>
           )}
         </div>
 
@@ -530,38 +566,47 @@ export const AppLauncherGrid: React.FC = () => {
             </button>
 
             {/* Power Submenu Flyout */}
-            {isPowerMenuOpen && (
-              <div 
-                onClick={(e) => e.stopPropagation()}
-                className="absolute bottom-12 right-0 w-36 rounded-[4px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-1.5 flex flex-col gap-1 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150 text-slate-800 dark:text-slate-100"
-              >
-                <button
-                  onClick={() => handlePowerAction('sleep')}
-                  className="w-full px-3 py-2 rounded-[4px] text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors text-left cursor-pointer"
+            <AnimatePresence>
+              {isPowerMenuOpen && (
+                <motion.div 
+                  key="power-menu-flyout"
+                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                  transition={{ duration: 0.14, ease: "easeOut" }}
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute bottom-12 right-0 w-36 rounded-[4px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-1.5 flex flex-col gap-1 z-50 text-slate-800 dark:text-slate-100"
                 >
-                  <Moon className="w-4 h-4 text-amber-500 shrink-0" />
-                  <span>Sleep</span>
-                </button>
-                <button
-                  onClick={() => handlePowerAction('restart')}
-                  className="w-full px-3 py-2 rounded-[4px] text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors text-left cursor-pointer"
-                >
-                  <RotateCw className="w-4 h-4 text-blue-500 shrink-0" />
-                  <span>Restart</span>
-                </button>
-                <div className="h-px bg-slate-200 dark:bg-slate-800 my-0.5" />
-                <button
-                  onClick={() => handlePowerAction('shutdown')}
-                  className="w-full px-3 py-2 rounded-[4px] text-xs font-medium text-red-600 dark:text-red-400 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors text-left cursor-pointer"
-                >
-                  <Power className="w-4 h-4 shrink-0" />
-                  <span>Shut down</span>
-                </button>
-              </div>
-            )}
+                  <button
+                    onClick={() => handlePowerAction('sleep')}
+                    className="w-full px-3 py-2 rounded-[4px] text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors text-left cursor-pointer"
+                  >
+                    <Moon className="w-4 h-4 text-amber-500 shrink-0" />
+                    <span>Sleep</span>
+                  </button>
+                  <button
+                    onClick={() => handlePowerAction('restart')}
+                    className="w-full px-3 py-2 rounded-[4px] text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors text-left cursor-pointer"
+                  >
+                    <RotateCw className="w-4 h-4 text-blue-500 shrink-0" />
+                    <span>Restart</span>
+                  </button>
+                  <div className="h-px bg-slate-200 dark:bg-slate-800 my-0.5" />
+                  <button
+                    onClick={() => handlePowerAction('shutdown')}
+                    className="w-full px-3 py-2 rounded-[4px] text-xs font-medium text-red-600 dark:text-red-400 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors text-left cursor-pointer"
+                  >
+                    <Power className="w-4 h-4 shrink-0" />
+                    <span>Shut down</span>
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </div>
-      </div>
+      </motion.div>
     </>
+  )}
+</AnimatePresence>
   );
 };

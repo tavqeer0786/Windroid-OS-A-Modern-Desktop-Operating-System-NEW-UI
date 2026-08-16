@@ -17,11 +17,6 @@ if [ -f "./linux/windroid-bridge.py" ] && [ -w "$INSTALL_BIN_DIR" ]; then
     chmod +x "$INSTALL_BIN_DIR/windroid-bridge.py"
 fi
 
-if [ -f "./linux/windroid-first-boot.py" ] && [ -w "$INSTALL_BIN_DIR" ]; then
-    cp "./linux/windroid-first-boot.py" "$INSTALL_BIN_DIR/windroid-first-boot.py"
-    chmod +x "$INSTALL_BIN_DIR/windroid-first-boot.py"
-fi
-
 if [ -f "./linux/windroid-shell-runner.sh" ] && [ -w "$INSTALL_BIN_DIR" ]; then
     cp "./linux/windroid-shell-runner.sh" "$INSTALL_BIN_DIR/windroid-shell-runner.sh"
     chmod +x "$INSTALL_BIN_DIR/windroid-shell-runner.sh"

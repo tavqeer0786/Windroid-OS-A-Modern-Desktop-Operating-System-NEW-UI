@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../../context/OSContext';
 import { AppId } from '../../types/os';
+import { AnimatePresence, motion } from 'motion/react';
 import { 
   Search, Sparkles, 
   ArrowRight, FileText, X
@@ -34,8 +35,6 @@ export const UniversalSearch: React.FC = () => {
       setQuery('');
     }
   }, [isUniversalSearchOpen]);
-
-  if (!isUniversalSearchOpen) return null;
 
   const isDemoEnabled = DemoPackageService.getInstance().isDemoEnabled(developerMode);
   const q = query.trim().toLowerCase();
@@ -112,14 +111,26 @@ export const UniversalSearch: React.FC = () => {
   };
 
   return (
-    <div 
-      onClick={closeAllPanels}
-      className="fixed inset-0 z-[9999] bg-slate-950/40 flex items-start justify-center pt-24 p-4 animate-in fade-in duration-150"
-    >
-      <div 
-        onClick={(e) => e.stopPropagation()}
-        className="bg-white/95 dark:bg-slate-900/95 border border-slate-200/80 dark:border-white/10 shadow-os-window rounded-[20px] max-w-xl w-full p-4 text-slate-900 dark:text-slate-100 backdrop-blur-2xl flex flex-col gap-3 select-none"
-      >
+    <AnimatePresence>
+      {isUniversalSearchOpen && (
+        <motion.div 
+          key="universal-search-backdrop"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          onClick={closeAllPanels}
+          className="fixed inset-0 z-[9999] bg-slate-950/40 flex items-start justify-center pt-24 p-4"
+        >
+          <motion.div 
+            key="universal-search-modal"
+            initial={{ opacity: 0, y: -20, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 350, damping: 28 }}
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white/95 dark:bg-slate-900/95 border border-slate-200/80 dark:border-white/10 shadow-os-window rounded-[20px] max-w-xl w-full p-4 text-slate-900 dark:text-slate-100 backdrop-blur-2xl flex flex-col gap-3 select-none"
+          >
         {/* Search Input Bar */}
         <div className="flex items-center gap-3 px-3.5 py-2.5 bg-slate-100/80 dark:bg-slate-800/80 rounded-xl border border-slate-200/60 dark:border-white/5 focus-within:ring-2 focus-within:ring-blue-500/50 transition-all">
           <Search className="w-5 h-5 text-blue-600 dark:text-blue-400 shrink-0" />
@@ -347,7 +358,9 @@ export const UniversalSearch: React.FC = () => {
             </button>
           )}
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
+  )}
+</AnimatePresence>
   );
 };

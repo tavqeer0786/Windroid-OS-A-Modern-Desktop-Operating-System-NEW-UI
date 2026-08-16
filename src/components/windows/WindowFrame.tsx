@@ -1,4 +1,5 @@
 import React, { useRef, useState } from 'react';
+import { motion } from 'motion/react';
 import { useOS } from '../../context/OSContext';
 import { WindowState } from '../../types/os';
 import { 
@@ -131,7 +132,8 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ windowState, children 
         width: '100vw',
         height: 'calc(100vh - 36px)',
         zIndex: windowState.zIndex,
-        borderRadius: 0
+        borderRadius: 0,
+        transformOrigin: 'center center'
       }
     : {
         position: 'fixed',
@@ -140,11 +142,27 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ windowState, children 
         width: windowState.width,
         height: windowState.height,
         zIndex: windowState.zIndex,
-        borderRadius: '14px'
+        borderRadius: '14px',
+        transformOrigin: 'center center'
       };
 
   return (
-    <div
+    <motion.div
+      key={windowState.id}
+      initial={{ opacity: 0, scale: 0.93 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ 
+        opacity: 0, 
+        scale: 0.93,
+        transition: { 
+          duration: 0.15, // 120–180ms
+          ease: [0.4, 0, 1, 1] // Ease In
+        }
+      }}
+      transition={{ 
+        duration: 0.21, // 180–250ms
+        ease: [0, 0, 0.2, 1] // Ease Out
+      }}
       onClick={() => focusWindow(windowState.id)}
       onContextMenu={(e) => {
         e.stopPropagation();
@@ -228,6 +246,6 @@ export const WindowFrame: React.FC<WindowFrameProps> = ({ windowState, children 
           <div className="w-2 h-2 border-r-2 border-b-2 border-slate-300 dark:border-slate-700 group-hover:border-blue-500 transition-colors" />
         </div>
       )}
-    </div>
+    </motion.div>
   );
 };

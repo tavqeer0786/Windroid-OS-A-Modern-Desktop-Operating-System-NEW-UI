@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { AnimatePresence } from 'motion/react';
 import { useOS } from '../../context/OSContext';
 import { DesktopIcon } from './DesktopIcon';
 import { DesktopDragOverlay } from './DesktopDragOverlay';
@@ -616,11 +617,15 @@ export const DesktopArea: React.FC = () => {
       </div>
 
       {/* Render Active Desktop Windows */}
-      {windows.map((win) => (
-        <WindowFrame key={win.id} windowState={win}>
-          {renderAppContent(win.appId, win.initialState)}
-        </WindowFrame>
-      ))}
+      <AnimatePresence>
+        {windows
+          .filter((win) => !win.isMinimized)
+          .map((win) => (
+            <WindowFrame key={win.id} windowState={win}>
+              {renderAppContent(win.appId, win.initialState)}
+            </WindowFrame>
+          ))}
+      </AnimatePresence>
 
       {/* Slide-over & Floating System Panels */}
       <QuickSettingsPanel />

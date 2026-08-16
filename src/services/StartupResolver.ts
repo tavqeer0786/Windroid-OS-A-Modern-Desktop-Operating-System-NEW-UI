@@ -342,7 +342,19 @@ export class StartupResolver {
                   source: 'native-cmdline'
                 };
               }
-            } else if (state === 'INSTALLER' || state === 'INSTALLATION_IN_PROGRESS') {
+            } else if (state === 'INSTALLER') {
+              const nativeMode = await bridge.getRuntimeMode();
+              if (nativeMode === 'live') {
+                return {
+                  runtimeMode: 'live',
+                  initialPhase: 'installation',
+                  initialStep: 'language',
+                  launchContext: 'live-desktop',
+                  installationCompleted: false,
+                  oobeCompleted: false,
+                  source: 'native-cmdline'
+                };
+              }
               return {
                 runtimeMode: 'installer',
                 initialPhase: 'installation',
@@ -352,7 +364,12 @@ export class StartupResolver {
                 oobeCompleted: false,
                 source: 'native-cmdline'
               };
-            } else if (state === 'FAILED') {
+            } else if (state === 'INSTALLATION_IN_PROGRESS' || state === 'FAILED') {
+              InstallerSessionStore.updateSession({
+                lifecycleState: 'FAILED',
+                installationFailed: true,
+                installationStage: 'failed'
+              });
               return {
                 runtimeMode: 'installer',
                 initialPhase: 'installation',

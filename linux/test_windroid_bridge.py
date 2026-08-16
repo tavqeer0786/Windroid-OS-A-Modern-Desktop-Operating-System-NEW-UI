@@ -93,6 +93,28 @@ class TestPhase2NativeInstallerEngine(unittest.TestCase):
 
 class TestNativeInstallerStateValidation(unittest.TestCase):
 
+    def test_valid_installer_state(self):
+        state = {
+            "version": "windroid-installer-state-v1",
+            "state": "INSTALLER",
+            "updatedAt": "2026-08-14T10:00:00Z",
+            "installationCompleted": False,
+            "oobeCompleted": False
+        }
+        valid, err = wb.validate_native_installer_state_data(state)
+        self.assertTrue(valid, f"Expected valid INSTALLER state, got: {err}")
+
+    def test_invalid_installer_state_marked_completed(self):
+        state = {
+            "version": "windroid-installer-state-v1",
+            "state": "INSTALLER",
+            "installationCompleted": True,
+            "oobeCompleted": False
+        }
+        valid, err = wb.validate_native_installer_state_data(state)
+        self.assertFalse(valid)
+        self.assertIn("installationCompleted must be false", err)
+
     def test_valid_oobe_pending_state(self):
         state = {
             "version": "windroid-installer-state-v1",
@@ -188,6 +210,7 @@ class TestFirstBootOrchestratorAndOobeHandoff(unittest.TestCase):
         fb.LIGHTDM_OOBE_CONF = os.path.join(fb.LIGHTDM_CONF_DIR, "80-windroid-oobe.conf")
         fb.LIGHTDM_LIVE_CONF = os.path.join(fb.LIGHTDM_CONF_DIR, "80-windroid-live-autologin.conf")
         fb.RUNTIME_MODE_FILE = os.path.join(self.test_dir, "runtime-mode")
+        fb.LOG_FILE = os.path.join(self.test_dir, "windroid-first-boot.log")
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
@@ -197,13 +220,45 @@ class TestFirstBootOrchestratorAndOobeHandoff(unittest.TestCase):
             "version": "windroid-installer-state-v1",
             "state": "OOBE_PENDING",
             "installationCompleted": True,
-            "oobeCompleted": False
+            "installationCompletedAt": "2026-08-14T10:00:00Z",
+            "oobeCompleted": False,
+            "userConfig": None
         }
         ok = fb.save_installer_state_atomic(state_data, self.test_dir)
         self.assertTrue(ok)
         saved = fb.load_installer_state(os.path.join(self.test_dir, "var/lib/windroid/installer-state.json"))
         self.assertEqual(saved["state"], "OOBE_PENDING")
         self.assertTrue(saved["installationCompleted"])
+
+    def test_backup_state_recovery_when_primary_corrupt(self):
+        # Write corrupted primary
+        with open(self.state_file, "w") as f:
+            f.write("corrupted json {")
+
+        # Write valid backup
+        valid_backup = {
+            "version": "windroid-installer-state-v1",
+            "state": "OOBE_PENDING",
+            "installationCompleted": True,
+            "installationCompletedAt": "2026-08-14T10:00:00Z",
+            "oobeCompleted": False,
+            "userConfig": None
+        }
+        with open(fb.STATE_BACKUP_FILE, "w") as f:
+            json.dump(valid_backup, f)
+
+        loaded = fb.load_installer_state(self.state_file)
+        self.assertEqual(loaded["state"], "OOBE_PENDING")
+        self.assertTrue(loaded["installationCompleted"])
+
+    def test_fail_closed_when_both_states_corrupt(self):
+        with open(self.state_file, "w") as f:
+            f.write("corrupted json {")
+        with open(fb.STATE_BACKUP_FILE, "w") as f:
+            f.write("corrupted backup {")
+
+        loaded = fb.load_installer_state(self.state_file)
+        self.assertEqual(loaded["state"], "FAILED")
 
     def test_lightdm_oobe_config_generation(self):
         fb.configure_lightdm_oobe()
@@ -215,12 +270,19 @@ class TestFirstBootOrchestratorAndOobeHandoff(unittest.TestCase):
         self.assertNotIn("autologin-user=user\n", content)
 
     def test_lightdm_real_user_config_generation(self):
-        fb.configure_lightdm_real_user("johndoe")
-        self.assertTrue(os.path.exists(fb.LIGHTDM_AUTOLOGIN_CONF))
-        with open(fb.LIGHTDM_AUTOLOGIN_CONF, "r") as f:
-            content = f.read()
-        self.assertIn("autologin-user=johndoe", content)
-        self.assertFalse(os.path.exists(fb.LIGHTDM_OOBE_CONF))
+        # Mock user_exists for testing
+        orig_user_exists = fb.user_exists
+        try:
+            fb.user_exists = lambda u: u == "johndoe"
+            ok = fb.configure_lightdm_real_user("johndoe")
+            self.assertTrue(ok)
+            self.assertTrue(os.path.exists(fb.LIGHTDM_AUTOLOGIN_CONF))
+            with open(fb.LIGHTDM_AUTOLOGIN_CONF, "r") as f:
+                content = f.read()
+            self.assertIn("autologin-user=johndoe", content)
+            self.assertFalse(os.path.exists(fb.LIGHTDM_OOBE_CONF))
+        finally:
+            fb.user_exists = orig_user_exists
 
     def test_reject_invalid_usernames_in_lightdm_real_user(self):
         self.assertFalse(fb.configure_lightdm_real_user(""))
@@ -244,6 +306,13 @@ class TestFirstBootOrchestratorAndOobeHandoff(unittest.TestCase):
         res4 = wb.complete_oobe_impl({"username": "Invalid User!"})
         self.assertFalse(res4["success"])
         self.assertIn("Invalid username format", res4["error"])
+
+    def test_cleanup_temporary_oobe_user_preconditions(self):
+        # Fails when user does not exist
+        self.assertFalse(fb.cleanup_temporary_oobe_user("nonexistentuser12345"))
+        # Fails when username is root or windroid-oobe
+        self.assertFalse(fb.cleanup_temporary_oobe_user("root"))
+        self.assertFalse(fb.cleanup_temporary_oobe_user("windroid-oobe"))
 
     def test_no_fake_bootloader_stubs_in_codebase(self):
         bridge_file = os.path.join(os.path.dirname(__file__), "windroid-bridge.py")

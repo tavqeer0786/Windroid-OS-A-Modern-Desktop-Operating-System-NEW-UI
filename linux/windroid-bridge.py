@@ -243,6 +243,14 @@ def validate_native_installer_state_data(data: dict) -> tuple[bool, str | None]:
     if state not in VALID_STATES:
         return False, f"Invalid state: '{state}'"
 
+    # 0. INSTALLER
+    if state == "INSTALLER":
+        if data.get("installationCompleted") is True:
+            return False, "installationCompleted must be false for INSTALLER state"
+        if data.get("oobeCompleted") is True:
+            return False, "oobeCompleted must be false for INSTALLER state"
+        return True, None
+
     # 1. INSTALLATION_IN_PROGRESS
     if state == "INSTALLATION_IN_PROGRESS":
         if data.get("userConfig") is not None:
@@ -262,13 +270,15 @@ def validate_native_installer_state_data(data: dict) -> tuple[bool, str | None]:
         if data.get("oobeCompleted") is True:
             return False, "oobeCompleted must be false for OOBE_PENDING"
         if not (data.get("installationCompletedAt") or data.get("completedAt") or data.get("updatedAt")):
-            return False, "Timestamp (installationCompletedAt or completedAt) must be present for OOBE_PENDING"
+            return False, "Timestamp (installationCompletedAt) must be present for OOBE_PENDING"
         if data.get("error") is not None:
             return False, "error must be null for OOBE_PENDING"
         return True, None
 
     # 3. OOBE_IN_PROGRESS
     if state == "OOBE_IN_PROGRESS":
+        if data.get("userConfig") is not None:
+            return False, "userConfig must be null during OOBE_IN_PROGRESS before user completion"
         if data.get("installationCompleted") is not True:
             return False, "installationCompleted must be true for OOBE_IN_PROGRESS"
         if data.get("oobeCompleted") is True:

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Windroid OS Desktop Shell Watchdog Runner
-# Automatically restarts Windroid Shell if it crashes or terminates unexpectedly.
+# Production-Grade Boot-Chain Implementation (Phase 2B Hardened)
+# Automatically manages and routes Windroid Shell sessions with strict fail-closed guarantees.
 
 export DISPLAY="${DISPLAY:-:0}"
 
@@ -11,37 +12,111 @@ BRIDGE_LOG="/tmp/windroid-bridge.log"
 
 echo "[Windroid OS] Initializing Desktop Shell Watchdog at $(date)" > "$SHELL_LOG"
 
-# Authoritative runtime mode & state detection
+# 1. Authoritative runtime environment detection
 CMDLINE=$(cat /proc/cmdline 2>/dev/null || echo "")
+IS_LIVE=0
+if [ -d "/run/live" ] || [ -d "/run/live/medium" ] || [ -d "/cdrom" ] || echo "$CMDLINE" | grep -q "boot=live" || echo "$CMDLINE" | grep -q "live-media"; then
+    IS_LIVE=1
+fi
+
 RUNTIME_MODE="installed"
-if [ -f "/etc/windroid/runtime-mode" ]; then
-    RUNTIME_MODE=$(cat /etc/windroid/runtime-mode | tr -d ' \n\r')
-elif [ -d "/run/live" ] || [ -d "/run/live/medium" ] || [ -d "/cdrom" ] || echo "$CMDLINE" | grep -q "boot=live"; then
+if [ "$IS_LIVE" -eq 1 ]; then
     RUNTIME_MODE="live"
+elif [ -f "/etc/windroid/runtime-mode" ]; then
+    RUNTIME_MODE=$(cat /etc/windroid/runtime-mode | tr -d ' \n\r')
 fi
 
-NATIVE_STATE="NOT_INSTALLED"
-if [ -f "/var/lib/windroid/installer-state.json" ]; then
-    NATIVE_STATE=$(python3 -c "import json; data=json.load(open('/var/lib/windroid/installer-state.json')); print(data.get('state', 'UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
-fi
+# 2. Authoritative Native State Evaluation via Python Validator
+STATE_EVAL=$(python3 -c "
+import json, os, re, subprocess
 
-IS_INSTALLER_BOOT=0
-IS_OOBE_BOOT=0
-IS_INSTALLED_DESKTOP=0
+STATE_FILE = '/var/lib/windroid/installer-state.json'
+VALID_STATES = ['INSTALLER', 'INSTALLATION_IN_PROGRESS', 'INSTALLATION_COMPLETE', 'OOBE_PENDING', 'OOBE_IN_PROGRESS', 'OOBE_COMPLETE', 'DESKTOP_READY', 'FAILED']
 
-if [ "$RUNTIME_MODE" = "installed" ] || [ "$NATIVE_STATE" = "OOBE_PENDING" ] || [ "$NATIVE_STATE" = "OOBE_IN_PROGRESS" ] || [ "$NATIVE_STATE" = "OOBE_COMPLETE" ] || [ "$NATIVE_STATE" = "DESKTOP_READY" ]; then
-    if [ "$NATIVE_STATE" = "OOBE_PENDING" ] || [ "$NATIVE_STATE" = "OOBE_IN_PROGRESS" ]; then
-        IS_OOBE_BOOT=1
-        echo "[Windroid OS] INSTALLED BOOT: Native state is '${NATIVE_STATE}'. Launching Windroid OOBE Session..." >> "$SHELL_LOG"
+if not os.path.exists(STATE_FILE):
+    print('MISSING|none|none')
+    exit(0)
+
+try:
+    with open(STATE_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or data.get('version') != 'windroid-installer-state-v1':
+        print('CORRUPT|none|none')
+        exit(0)
+    state = data.get('state')
+    if state not in VALID_STATES:
+        print('INVALID|none|none')
+        exit(0)
+    u_cfg = data.get('userConfig') or {}
+    username = str(u_cfg.get('username', '')).strip()
+    
+    # Check if user exists in system passwd
+    user_ok = 'no'
+    if username and username not in ['root', 'user', 'windroid-oobe']:
+        res = subprocess.run(['getent', 'passwd', username], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            user_ok = 'yes'
+            
+    print(f'{state}|{username}|{user_ok}')
+except Exception as e:
+    print('ERROR|none|none')
+" 2>/dev/null || echo "ERROR|none|none")
+
+NATIVE_STATE=$(echo "$STATE_EVAL" | cut -d'|' -f1)
+NATIVE_USER=$(echo "$STATE_EVAL" | cut -d'|' -f2)
+USER_EXISTS=$(echo "$STATE_EVAL" | cut -d'|' -f3)
+
+echo "[Windroid OS] Runtime Mode: $RUNTIME_MODE | Evaluated State: $NATIVE_STATE | User: $NATIVE_USER (Exists: $USER_EXISTS)" >> "$SHELL_LOG"
+
+# 3. Deterministic URL Selection with Fail-Closed Guarantees
+TARGET_URL="http://127.0.0.1:4173/"
+SESSION_TYPE="live-desktop"
+
+if [ "$IS_LIVE" -eq 1 ]; then
+    if echo "$CMDLINE" | grep -q "windroid.mode=installer"; then
+        SESSION_TYPE="installer"
+        TARGET_URL="http://127.0.0.1:4173/?mode=installer&context=boot"
+        echo "[Windroid OS] LIVE ISO: Dedicated installer requested via cmdline." >> "$SHELL_LOG"
     else
-        IS_INSTALLED_DESKTOP=1
-        echo "[Windroid OS] INSTALLED BOOT: Native state is '${NATIVE_STATE}'. Launching Windroid User Desktop..." >> "$SHELL_LOG"
+        SESSION_TYPE="live-desktop"
+        TARGET_URL="http://127.0.0.1:4173/?mode=live&context=live-desktop"
+        echo "[Windroid OS] LIVE ISO: Launching Windroid Live Desktop." >> "$SHELL_LOG"
     fi
-elif [ "$RUNTIME_MODE" = "live" ] && echo "$CMDLINE" | grep -q "windroid.mode=installer"; then
-    IS_INSTALLER_BOOT=1
-    echo "[Windroid OS] LIVE ISO BOOT: Kernel cmdline contains 'windroid.mode=installer'. Launching DEDICATED LIVE INSTALLER SESSION..." >> "$SHELL_LOG"
 else
-    echo "[Windroid OS] LIVE ISO BOOT: Launching FULL WINDROID LIVE DESKTOP..." >> "$SHELL_LOG"
+    # Installed system
+    case "$NATIVE_STATE" in
+        OOBE_PENDING|OOBE_IN_PROGRESS)
+            SESSION_TYPE="oobe"
+            TARGET_URL="http://127.0.0.1:4173/?mode=oobe&context=installed-boot"
+            echo "[Windroid OS] INSTALLED SYSTEM: Launching OOBE Session ($NATIVE_STATE)." >> "$SHELL_LOG"
+            ;;
+        OOBE_COMPLETE|DESKTOP_READY)
+            if [ "$USER_EXISTS" = "yes" ]; then
+                SESSION_TYPE="installed-desktop"
+                TARGET_URL="http://127.0.0.1:4173/?mode=installed&context=boot"
+                echo "[Windroid OS] INSTALLED SYSTEM: Real user '$NATIVE_USER' verified. Launching Normal Desktop." >> "$SHELL_LOG"
+            else
+                SESSION_TYPE="oobe"
+                TARGET_URL="http://127.0.0.1:4173/?mode=oobe&context=installed-boot"
+                echo "[Windroid OS] INSTALLED SYSTEM: User '$NATIVE_USER' not verified. Falling back to OOBE." >> "$SHELL_LOG"
+            fi
+            ;;
+        FAILED)
+            SESSION_TYPE="recovery"
+            TARGET_URL="http://127.0.0.1:4173/?mode=recovery&error=installation_failed"
+            echo "[Windroid OS] INSTALLED SYSTEM: State is FAILED. Routing to recovery." >> "$SHELL_LOG"
+            ;;
+        INSTALLATION_IN_PROGRESS)
+            SESSION_TYPE="recovery"
+            TARGET_URL="http://127.0.0.1:4173/?mode=recovery&error=incomplete_installation"
+            echo "[Windroid OS] INSTALLED SYSTEM: Incomplete installation detected. Routing to recovery." >> "$SHELL_LOG"
+            ;;
+        *)
+            SESSION_TYPE="recovery"
+            TARGET_URL="http://127.0.0.1:4173/?mode=recovery&error=missing_or_corrupt_state"
+            echo "[Windroid OS] INSTALLED SYSTEM: Missing or corrupt state ($NATIVE_STATE). Routing to recovery." >> "$SHELL_LOG"
+            ;;
+    esac
 fi
 
 HTTP_PID=""
@@ -64,7 +139,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 while true; do
-    if [ -x "/usr/bin/windroid-desktop" ] && [ "$IS_INSTALLER_BOOT" -eq 0 ]; then
+    if [ -x "/usr/bin/windroid-desktop" ] && [ "$SESSION_TYPE" = "installed-desktop" ]; then
         echo "[Windroid OS] Starting native Windroid OS Desktop Shell..." >> "$SHELL_LOG"
         /usr/bin/windroid-desktop --fullscreen >> "$SHELL_LOG" 2>&1
         EXIT_CODE=$?
@@ -109,8 +184,8 @@ while true; do
                 echo "[Windroid OS] Native System Bridge is ready at http://127.0.0.1:4174/" >> "$SHELL_LOG"
             else
                 echo "[ERROR] System Bridge did not respond on 127.0.0.1:4174 within 10s!" >> "$SHELL_LOG"
-                if [ "$IS_INSTALLER_BOOT" -eq 1 ]; then
-                    echo "[FATAL] Native Bridge unreachable in Installer Boot Mode. Hard stopping installer session." >> "$SHELL_LOG"
+                if [ "$SESSION_TYPE" = "installer" ] || [ "$SESSION_TYPE" = "oobe" ]; then
+                    echo "[FATAL] Native Bridge unreachable in $SESSION_TYPE Boot Mode. Hard stopping session." >> "$SHELL_LOG"
                     if command -v zenity >/dev/null 2>&1; then
                         zenity --question \
                             --title="Windroid Setup - Fatal System Bridge Failure" \
@@ -128,10 +203,9 @@ while true; do
                             systemctl poweroff 2>/dev/null || poweroff 2>/dev/null || true
                         fi
                     else
-                        echo "FATAL: Native bridge unreachable in Installer mode. Powering off..." >> "$SHELL_LOG"
+                        echo "FATAL: Native bridge unreachable in $SESSION_TYPE mode. Powering off..." >> "$SHELL_LOG"
                         systemctl poweroff 2>/dev/null || poweroff 2>/dev/null || true
                     fi
-                    # FAIL-CLOSED: Stop script immediately. Never launch HTTP server or Chromium or Live Desktop.
                     exit 1
                 fi
             fi
@@ -165,22 +239,7 @@ while true; do
             fi
 
             CHROMIUM_BIN="$(command -v chromium)"
-            echo "[Windroid OS] Starting Chromium Kiosk Web Shell using ${CHROMIUM_BIN}..." >> "$SHELL_LOG"
-            
-            TARGET_URL="http://127.0.0.1:4173/"
-            if [ "$IS_INSTALLER_BOOT" -eq 1 ]; then
-                TARGET_URL="http://127.0.0.1:4173/?mode=installer&context=boot"
-                echo "[Windroid OS] Dedicated Live Installer URL: ${TARGET_URL}" >> "$SHELL_LOG"
-            elif [ "$IS_OOBE_BOOT" -eq 1 ]; then
-                TARGET_URL="http://127.0.0.1:4173/?mode=oobe&context=installed-boot"
-                echo "[Windroid OS] Dedicated Installed OOBE URL: ${TARGET_URL}" >> "$SHELL_LOG"
-            elif [ "$IS_INSTALLED_DESKTOP" -eq 1 ]; then
-                TARGET_URL="http://127.0.0.1:4173/?mode=installed&context=boot"
-                echo "[Windroid OS] Dedicated Installed Desktop URL: ${TARGET_URL}" >> "$SHELL_LOG"
-            else
-                TARGET_URL="http://127.0.0.1:4173/?mode=live&context=live-desktop"
-                echo "[Windroid OS] Dedicated Live Desktop URL: ${TARGET_URL}" >> "$SHELL_LOG"
-            fi
+            echo "[Windroid OS] Starting Chromium Kiosk Web Shell using ${CHROMIUM_BIN} with URL: ${TARGET_URL}" >> "$SHELL_LOG"
 
             "$CHROMIUM_BIN" \
                 --kiosk \
@@ -211,12 +270,11 @@ while true; do
                 wait "$BRIDGE_PID" 2>/dev/null || true
                 BRIDGE_PID=""
             fi
-        elif [ "$IS_INSTALLER_BOOT" -eq 1 ]; then
-            echo "[FATAL] Chromium binary is missing; required for Installer Boot Mode." >> "$SHELL_LOG"
+        elif [ "$SESSION_TYPE" = "installer" ] || [ "$SESSION_TYPE" = "oobe" ]; then
+            echo "[FATAL] Chromium binary is missing; required for $SESSION_TYPE Boot Mode." >> "$SHELL_LOG"
             EXIT_CODE=1
         elif command -v firefox >/dev/null 2>&1; then
             echo "[Windroid OS] Starting Firefox Kiosk Web Shell..." >> "$SHELL_LOG"
-            TARGET_URL="file://${WEB_DIR}/index.html"
             firefox --kiosk "$TARGET_URL" >> "$CHROMIUM_LOG" 2>&1
             EXIT_CODE=$?
         else
@@ -230,9 +288,9 @@ while true; do
 
     echo "[Windroid OS] Desktop Shell loop iteration finished with exit code $EXIT_CODE" >> "$SHELL_LOG"
 
-    # In Installer Boot Mode, exiting shell must NEVER drop to Live Desktop
-    if [ "$IS_INSTALLER_BOOT" -eq 1 ]; then
-        echo "[Windroid OS] Installer session closed. Triggering exit options..." >> "$SHELL_LOG"
+    # In Installer/OOBE Boot Mode, exiting shell must NEVER drop to Live Desktop
+    if [ "$SESSION_TYPE" = "installer" ] || [ "$SESSION_TYPE" = "oobe" ]; then
+        echo "[Windroid OS] $SESSION_TYPE session closed. Triggering exit options..." >> "$SHELL_LOG"
         if command -v zenity >/dev/null 2>&1; then
             zenity --question \
                 --title="Exit Windroid Setup" \
@@ -251,7 +309,7 @@ while true; do
             sleep 2
         fi
     else
-        # Live Mode interactive restart dialog
+        # Interactive restart dialog
         if command -v zenity >/dev/null 2>&1; then
             zenity --question \
                 --title="Windroid OS Desktop" \
@@ -271,4 +329,3 @@ while true; do
         fi
     fi
 done
-

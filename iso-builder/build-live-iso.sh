@@ -343,6 +343,7 @@ fi
 
 # Permissions setup
 chmod +x /usr/bin/windroid-bridge.py 2>/dev/null || true
+chmod +x /usr/bin/windroid-first-boot.py 2>/dev/null || true
 chmod +x /usr/bin/windroid-shell-runner.sh 2>/dev/null || true
 if [ -f "/usr/bin/windroid-desktop" ]; then
     chmod +x /usr/bin/windroid-desktop 2>/dev/null || true
@@ -353,6 +354,7 @@ update-alternatives --set x-session-manager /usr/bin/openbox-session 2>/dev/null
 
 # Enable services
 systemctl enable windroid-bridge.service 2>/dev/null || true
+systemctl enable windroid-first-boot.service 2>/dev/null || true
 systemctl enable lightdm 2>/dev/null || systemctl enable LightDM 2>/dev/null || true
 systemctl enable NetworkManager 2>/dev/null || true
 systemctl enable bluetooth 2>/dev/null || true

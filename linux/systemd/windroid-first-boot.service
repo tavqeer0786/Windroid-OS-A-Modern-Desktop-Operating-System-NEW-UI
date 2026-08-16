@@ -1,9 +1,10 @@
 [Unit]
 Description=Windroid OS Installed First-Boot & OOBE Orchestrator
 DefaultDependencies=no
-After=local-fs.target
+After=local-fs.target systemd-user-sessions.service
 Wants=local-fs.target
-Before=lightdm.service display-manager.service graphical.target
+Before=lightdm.service display-manager.service
+RequiredBy=lightdm.service display-manager.service
 
 [Service]
 Type=oneshot
